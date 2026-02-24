@@ -11,6 +11,7 @@ class StatsService {
     let highestWinStreak = 0;
     let highestLoseStreak = 0;
     let firstLossGameNumber = null; // Track first loss game number
+    const allResults = []; // Track all game results
 
     games.forEach((game) => {
       // teamBlue and teamRed are populated, so we need to check _id
@@ -24,6 +25,12 @@ class StatsService {
       let isWin = false;
       if (isInTeamBlue && game.winner === "teamBlue") isWin = true;
       if (isInTeamRed && game.winner === "teamRed") isWin = true;
+
+      // Track result for last 5
+      allResults.push({
+        gameNumber: game.gameNumber,
+        result: isWin ? 'W' : 'L'
+      });
 
       if (isWin) {
         totalWin++;
@@ -43,6 +50,9 @@ class StatsService {
 
     const pts = totalWin + highestWinStreak - highestLoseStreak;
 
+    // Get last 5 games (or all if less than 5)
+    const lastFiveGames = allResults.slice(-5);
+
     return {
       totalWin,
       highestWinStreak,
@@ -51,6 +61,7 @@ class StatsService {
       pts,
       totalGames: games.length,
       winRate: games.length > 0 ? (totalWin / games.length) * 100 : 0,
+      lastFiveGames, // Array of {gameNumber, result: 'W'/'L'}
     };
   }
 
