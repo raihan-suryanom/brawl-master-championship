@@ -139,4 +139,66 @@ router.get("/:playerId/position-history", async (req, res) => {
   }
 });
 
+// GET /api/players/:playerId/full-profile - Bundled endpoint for player detail page
+router.get("/:playerId/full-profile", async (req, res) => {
+  try {
+    const { playerId } = req.params;
+    const { fromSeriesId, toSeriesId } = req.query;
+
+    // Determine cache key
+    let cacheKey;
+    if (fromSeriesId && toSeriesId) {
+      cacheKey = cacheManager.generateKey("player-full-profile", playerId, `${fromSeriesId}-${toSeriesId}`);
+    } else {
+      cacheKey = cacheManager.generateKey("player-full-profile", playerId, "all");
+    }
+
+    // Check cache first
+    const cached = cacheManager.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    // Fetch all data in parallel
+    let statsPromise, combo2Promise, combo3Promise, posHistoryPromise;
+
+    if (fromSeriesId && toSeriesId) {
+      [statsPromise, combo2Promise, combo3Promise, posHistoryPromise] = [
+        statsService.getPlayerStatsRange(playerId, fromSeriesId, toSeriesId),
+        statsService.getPlayerCombinationsRange(playerId, fromSeriesId, toSeriesId, 2),
+        statsService.getPlayerCombinationsRange(playerId, fromSeriesId, toSeriesId, 3),
+        statsService.getPlayerPositionHistoryRange(playerId, fromSeriesId, toSeriesId),
+      ];
+    } else {
+      [statsPromise, combo2Promise, combo3Promise, posHistoryPromise] = [
+        statsService.getPlayerStats(playerId),
+        statsService.getPlayerCombinations(playerId, null, 2),
+        statsService.getPlayerCombinations(playerId, null, 3),
+        statsService.getPlayerPositionHistory(playerId),
+      ];
+    }
+
+    const [stats, combinations2, combinations3, positionHistory] = await Promise.all([
+      statsPromise,
+      combo2Promise,
+      combo3Promise,
+      posHistoryPromise,
+    ]);
+
+    const result = {
+      stats,
+      combinations2,
+      combinations3,
+      positionHistory,
+    };
+
+    // Cache the result
+    cacheManager.set(cacheKey, result);
+
+    res.status(200).json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 module.exports = router;

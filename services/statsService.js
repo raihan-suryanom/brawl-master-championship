@@ -784,8 +784,9 @@ class StatsService {
     return results;
   }
 
-  // Get player's position history across all series
+  // Get player's position history across all series (OPTIMIZED with aggregation)
   async getPlayerPositionHistory(playerId) {
+    const mongoose = require("mongoose");
     const Series = require("../models/Series");
     
     // Get all series sorted by name
@@ -795,17 +796,71 @@ class StatsService {
       return {};
     }
 
+    const seriesIds = allSeries.map(s => s._id);
+    const playerObjectId = new mongoose.Types.ObjectId(playerId);
+
+    // Fetch ALL games across all series where player participated (ONE query)
+    const games = await Game.find({
+      seriesId: { $in: seriesIds },
+      $or: [
+        { teamBlue: playerObjectId },
+        { teamRed: playerObjectId }
+      ]
+    })
+      .populate("teamBlue", "name picture color")
+      .populate("teamRed", "name picture color")
+      .populate("seriesId", "name")
+      .lean();
+
+    if (games.length === 0) {
+      return {};
+    }
+
+    // Group games by series
+    const gamesBySeries = new Map();
+    games.forEach(game => {
+      const seriesId = game.seriesId._id.toString();
+      if (!gamesBySeries.has(seriesId)) {
+        gamesBySeries.set(seriesId, []);
+      }
+      gamesBySeries.get(seriesId).push(game);
+    });
+
+    // Calculate stats for each series and determine player rank
     const positionCounts = {};
-    
-    // For each series, calculate player's rank
-    for (const series of allSeries) {
-      const seriesStats = await this.getSeriesStats(series._id.toString());
-      
-      // Find player's rank in this series
+
+    for (const [seriesId, seriesGames] of gamesBySeries) {
+      // Sort games by game number
+      seriesGames.sort((a, b) => a.gameNumber - b.gameNumber);
+
+      // Get unique players in this series
+      const playerIds = new Set();
+      seriesGames.forEach(game => {
+        game.teamBlue.forEach(p => playerIds.add(p._id.toString()));
+        game.teamRed.forEach(p => playerIds.add(p._id.toString()));
+      });
+
+      // Calculate stats for all players in this series
+      const seriesStats = [];
+      for (const pid of playerIds) {
+        const stats = this.calculatePlayerStats(pid, seriesGames);
+        seriesStats.push({ playerId: pid, ...stats });
+      }
+
+      // Sort by tiebreaker rules
+      seriesStats.sort((a, b) => {
+        if (b.pts !== a.pts) return b.pts - a.pts;
+        if (b.totalWin !== a.totalWin) return b.totalWin - a.totalWin;
+        if (b.highestWinStreak !== a.highestWinStreak) return b.highestWinStreak - a.highestWinStreak;
+        if (Math.abs(b.winRate - a.winRate) > 0.01) return b.winRate - a.winRate;
+        if (a.highestLoseStreak !== b.highestLoseStreak) return a.highestLoseStreak - b.highestLoseStreak;
+        return b.firstLossGameNumber - a.firstLossGameNumber;
+      });
+
+      // Find player's rank
       const playerRank = seriesStats.findIndex(s => s.playerId === playerId.toString()) + 1;
       
       if (playerRank > 0) {
-        // Player participated in this series
         positionCounts[playerRank] = (positionCounts[playerRank] || 0) + 1;
       }
     }
@@ -813,7 +868,7 @@ class StatsService {
     return positionCounts;
   }
 
-  // Get player's position history for a range of series
+  // Get player's position history for a range of series (OPTIMIZED)
   async getPlayerPositionHistoryRange(playerId, fromSeriesId, toSeriesId) {
     const mongoose = require("mongoose");
     const Series = require("../models/Series");
@@ -833,17 +888,71 @@ class StatsService {
       return {};
     }
 
+    const seriesIds = seriesInRange.map(s => s._id);
+    const playerObjectId = new mongoose.Types.ObjectId(playerId);
+
+    // Fetch ALL games across series range where player participated (ONE query)
+    const games = await Game.find({
+      seriesId: { $in: seriesIds },
+      $or: [
+        { teamBlue: playerObjectId },
+        { teamRed: playerObjectId }
+      ]
+    })
+      .populate("teamBlue", "name picture color")
+      .populate("teamRed", "name picture color")
+      .populate("seriesId", "name")
+      .lean();
+
+    if (games.length === 0) {
+      return {};
+    }
+
+    // Group games by series
+    const gamesBySeries = new Map();
+    games.forEach(game => {
+      const seriesId = game.seriesId._id.toString();
+      if (!gamesBySeries.has(seriesId)) {
+        gamesBySeries.set(seriesId, []);
+      }
+      gamesBySeries.get(seriesId).push(game);
+    });
+
+    // Calculate stats for each series and determine player rank
     const positionCounts = {};
-    
-    // For each series, calculate player's rank
-    for (const series of seriesInRange) {
-      const seriesStats = await this.getSeriesStats(series._id.toString());
-      
-      // Find player's rank in this series
+
+    for (const [seriesId, seriesGames] of gamesBySeries) {
+      // Sort games by game number
+      seriesGames.sort((a, b) => a.gameNumber - b.gameNumber);
+
+      // Get unique players in this series
+      const playerIds = new Set();
+      seriesGames.forEach(game => {
+        game.teamBlue.forEach(p => playerIds.add(p._id.toString()));
+        game.teamRed.forEach(p => playerIds.add(p._id.toString()));
+      });
+
+      // Calculate stats for all players in this series
+      const seriesStats = [];
+      for (const pid of playerIds) {
+        const stats = this.calculatePlayerStats(pid, seriesGames);
+        seriesStats.push({ playerId: pid, ...stats });
+      }
+
+      // Sort by tiebreaker rules
+      seriesStats.sort((a, b) => {
+        if (b.pts !== a.pts) return b.pts - a.pts;
+        if (b.totalWin !== a.totalWin) return b.totalWin - a.totalWin;
+        if (b.highestWinStreak !== a.highestWinStreak) return b.highestWinStreak - a.highestWinStreak;
+        if (Math.abs(b.winRate - a.winRate) > 0.01) return b.winRate - a.winRate;
+        if (a.highestLoseStreak !== b.highestLoseStreak) return a.highestLoseStreak - b.highestLoseStreak;
+        return b.firstLossGameNumber - a.firstLossGameNumber;
+      });
+
+      // Find player's rank
       const playerRank = seriesStats.findIndex(s => s.playerId === playerId.toString()) + 1;
       
       if (playerRank > 0) {
-        // Player participated in this series
         positionCounts[playerRank] = (positionCounts[playerRank] || 0) + 1;
       }
     }
