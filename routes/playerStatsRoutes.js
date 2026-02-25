@@ -159,7 +159,7 @@ router.get("/:playerId/full-profile", async (req, res) => {
       return res.status(200).json(cached);
     }
 
-    // Fetch all data in parallel
+    // Fetch player's data
     let statsPromise, combo2Promise, combo3Promise, posHistoryPromise;
 
     if (fromSeriesId && toSeriesId) {
@@ -185,14 +185,26 @@ router.get("/:playerId/full-profile", async (req, res) => {
       posHistoryPromise,
     ]);
 
+    // Fetch ALL players stats for radar normalization context
+    const Player = require("../models/Player");
+    const allPlayers = await Player.find().lean();
+    
+    const allPlayersStatsPromises = allPlayers.map(p => 
+      statsService.getPlayerStats(p._id.toString())
+    );
+    const allPlayersStats = await Promise.all(allPlayersStatsPromises);
+
     const result = {
       stats,
       combinations2,
       combinations3,
       positionHistory,
+      radarContext: {
+        allPlayersStats, // All player stats for radar normalization
+      },
     };
 
-    // Cache the result
+    // Cache the result (10 minutes TTL)
     cacheManager.set(cacheKey, result);
 
     res.status(200).json(result);

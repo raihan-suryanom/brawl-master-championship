@@ -65,41 +65,20 @@ router.post("/", async (req, res) => {
     const game = new Game({ ...req.body, seriesId: req.params.seriesId });
     const savedGame = await game.save();
 
-    // Invalidate all related caches
-    const seriesId = req.params.seriesId;
+    // AGGRESSIVE CACHE INVALIDATION - Clear all related caches
+    console.log('[Cache] Invalidating after game POST...');
     
-    // Invalidate series stats cache
-    cacheManager.delete(cacheManager.generateKey("series-stats", seriesId));
+    // Clear all series-related caches
+    cacheManager.deletePattern('^series-stats:');
+    cacheManager.deletePattern('^series-pts-progression:');
     
-    // Invalidate series pts progression cache
-    cacheManager.delete(cacheManager.generateKey("series-pts-progression", seriesId));
+    // Clear all player-related caches
+    cacheManager.deletePattern('^player-stats:');
+    cacheManager.deletePattern('^player-combinations:');
+    cacheManager.deletePattern('^player-full-profile:');
+    cacheManager.deletePattern('^player-position-history:');
     
-    // Invalidate all player stats & combinations cache for players in this game
-    const allPlayerIds = [...req.body.teamBlue, ...req.body.teamRed];
-    allPlayerIds.forEach((playerId) => {
-      // Invalidate specific series player stats
-      cacheManager.delete(
-        cacheManager.generateKey("player-stats", playerId, seriesId)
-      );
-      // Invalidate overall player stats
-      cacheManager.delete(
-        cacheManager.generateKey("player-stats", playerId, "all")
-      );
-      
-      // Invalidate combinations (size 2 and 3, both specific series and all)
-      cacheManager.delete(
-        cacheManager.generateKey("player-combinations", playerId, seriesId, 2)
-      );
-      cacheManager.delete(
-        cacheManager.generateKey("player-combinations", playerId, seriesId, 3)
-      );
-      cacheManager.delete(
-        cacheManager.generateKey("player-combinations", playerId, "all", 2)
-      );
-      cacheManager.delete(
-        cacheManager.generateKey("player-combinations", playerId, "all", 3)
-      );
-    });
+    console.log('[Cache] Invalidation complete');
 
     res.status(201).json(savedGame);
   } catch (error) {

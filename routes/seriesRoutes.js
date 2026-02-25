@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const Series = require("../models/Series");
+const cacheManager = require("../utils/cacheManager");
 
 // GET /api/series
 router.get("/", async (req, res) => {
@@ -31,6 +32,16 @@ router.post("/", async (req, res) => {
   try {
     const series = new Series(req.body);
     const savedSeries = await series.save();
+    
+    // AGGRESSIVE CACHE INVALIDATION
+    console.log('[Cache] Invalidating after series POST...');
+    
+    // New series affects position history
+    cacheManager.deletePattern('^player-position-history:');
+    cacheManager.deletePattern('^player-full-profile:');
+    
+    console.log('[Cache] Invalidation complete');
+    
     res.status(201).json(savedSeries);
   } catch (error) {
     res.status(400).json({ message: error.message });

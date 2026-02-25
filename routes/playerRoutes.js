@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const Player = require("../models/Player");
+const cacheManager = require("../utils/cacheManager");
 
 // GET /api/players
 router.get("/", async (req, res) => {
@@ -28,6 +29,15 @@ router.post("/", async (req, res) => {
   try {
     const player = new Player(req.body);
     const savedPlayer = await player.save();
+    
+    // AGGRESSIVE CACHE INVALIDATION
+    console.log('[Cache] Invalidating after player POST...');
+    
+    // New player affects full-profile (radar context needs all players)
+    cacheManager.deletePattern('^player-full-profile:');
+    
+    console.log('[Cache] Invalidation complete');
+    
     res.status(201).json(savedPlayer);
   } catch (error) {
     res.status(400).json({ message: error.message });
