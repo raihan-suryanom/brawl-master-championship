@@ -511,6 +511,345 @@ class StatsService {
 
     return results;
   }
+
+  // Get player stats for a range of series (fromSeriesId to toSeriesId)
+  async getPlayerStatsRange(playerId, fromSeriesId, toSeriesId) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
+    const playerObjectId = new mongoose.Types.ObjectId(playerId);
+    const fromSeriesObjectId = new mongoose.Types.ObjectId(fromSeriesId);
+    const toSeriesObjectId = new mongoose.Types.ObjectId(toSeriesId);
+
+    // Get all series in the range (sorted by name for sequential order)
+    const seriesInRange = await Series.find({
+      _id: {
+        $gte: fromSeriesObjectId,
+        $lte: toSeriesObjectId
+      }
+    }).sort({ name: 1 });
+
+    if (seriesInRange.length === 0) {
+      return {
+        playerId: playerId.toString(),
+        name: "Unknown",
+        picture: "",
+        color: "#000000",
+        totalWin: 0,
+        highestWinStreak: 0,
+        highestLoseStreak: 0,
+        firstLossGameNumber: 999,
+        pts: 0,
+        totalGames: 0,
+        winRate: 0,
+        lastFiveGames: [],
+      };
+    }
+
+    const seriesIds = seriesInRange.map(s => s._id);
+
+    // Get all games from these series where player participated
+    const query = { 
+      seriesId: { $in: seriesIds },
+      $or: [
+        { teamBlue: playerObjectId },
+        { teamRed: playerObjectId }
+      ]
+    };
+
+    const games = await Game.find(query)
+      .populate("teamBlue", "name picture color")
+      .populate("teamRed", "name picture color")
+      .populate("seriesId", "name")
+      .lean();
+
+    // Sort by series name then game number
+    games.sort((a, b) => {
+      const seriesAName = a.seriesId?.name || "";
+      const seriesBName = b.seriesId?.name || "";
+      
+      if (seriesAName < seriesBName) return -1;
+      if (seriesAName > seriesBName) return 1;
+      
+      return a.gameNumber - b.gameNumber;
+    });
+
+    const player = await Player.findById(playerId);
+
+    if (!player) {
+      throw new Error("Player not found");
+    }
+
+    if (games.length === 0) {
+      return {
+        playerId: playerId.toString(),
+        name: player.name,
+        picture: player.picture,
+        color: player.color,
+        totalWin: 0,
+        highestWinStreak: 0,
+        highestLoseStreak: 0,
+        firstLossGameNumber: 999,
+        pts: 0,
+        totalGames: 0,
+        winRate: 0,
+        lastFiveGames: [],
+      };
+    }
+
+    const stats = this.calculatePlayerStats(playerId, games);
+
+    return {
+      playerId: playerId.toString(),
+      name: player.name,
+      picture: player.picture,
+      color: player.color,
+      ...stats,
+    };
+  }
+
+  // Get player combinations for a range of series
+  async getPlayerCombinationsRange(playerId, fromSeriesId, toSeriesId, combinationSize = 2) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
+    const playerObjectId = new mongoose.Types.ObjectId(playerId);
+    const fromSeriesObjectId = new mongoose.Types.ObjectId(fromSeriesId);
+    const toSeriesObjectId = new mongoose.Types.ObjectId(toSeriesId);
+
+    // Get all series in the range
+    const seriesInRange = await Series.find({
+      _id: {
+        $gte: fromSeriesObjectId,
+        $lte: toSeriesObjectId
+      }
+    }).sort({ name: 1 });
+
+    if (seriesInRange.length === 0) {
+      return [];
+    }
+
+    const seriesIds = seriesInRange.map(s => s._id);
+
+    // Get all games from these series where player participated
+    const query = { 
+      seriesId: { $in: seriesIds },
+      $or: [
+        { teamBlue: playerObjectId },
+        { teamRed: playerObjectId }
+      ]
+    };
+
+    const games = await Game.find(query)
+      .populate("teamBlue", "name picture color")
+      .populate("teamRed", "name picture color")
+      .populate("seriesId", "name")
+      .lean();
+
+    // Sort games
+    games.sort((a, b) => {
+      const seriesAName = a.seriesId?.name || "";
+      const seriesBName = b.seriesId?.name || "";
+      
+      if (seriesAName < seriesBName) return -1;
+      if (seriesAName > seriesBName) return 1;
+      
+      return a.gameNumber - b.gameNumber;
+    });
+
+    if (games.length === 0) {
+      return [];
+    }
+
+    // Track combinations and their results
+    const combinationStats = new Map();
+
+    games.forEach((game) => {
+      const isInTeamBlue = game.teamBlue.some(
+        (p) => p._id.toString() === playerId.toString()
+      );
+      const isInTeamRed = game.teamRed.some(
+        (p) => p._id.toString() === playerId.toString()
+      );
+
+      const team = isInTeamBlue ? game.teamBlue : game.teamRed;
+      const isWin = 
+        (isInTeamBlue && game.winner === "teamBlue") ||
+        (isInTeamRed && game.winner === "teamRed");
+
+      // Get teammates (excluding the player itself)
+      const teammates = team.filter(
+        (p) => p._id.toString() !== playerId.toString()
+      );
+
+      // Generate combinations
+      if (combinationSize === 2) {
+        // Each teammate is a duo
+        teammates.forEach((teammate) => {
+          const key = [playerId.toString(), teammate._id.toString()]
+            .sort()
+            .join("-");
+
+          if (!combinationStats.has(key)) {
+            combinationStats.set(key, {
+              players: [
+                { id: playerId.toString(), name: "", picture: "", color: "" },
+                {
+                  id: teammate._id.toString(),
+                  name: teammate.name,
+                  picture: teammate.picture,
+                  color: teammate.color,
+                },
+              ],
+              wins: 0,
+              losses: 0,
+              totalGames: 0,
+            });
+          }
+
+          const stat = combinationStats.get(key);
+          stat.totalGames++;
+          if (isWin) stat.wins++;
+          else stat.losses++;
+        });
+      } else if (combinationSize === 3 && teammates.length >= 2) {
+        // Generate all pairs of teammates (trio = player + 2 teammates)
+        for (let i = 0; i < teammates.length; i++) {
+          for (let j = i + 1; j < teammates.length; j++) {
+            const key = [
+              playerId.toString(),
+              teammates[i]._id.toString(),
+              teammates[j]._id.toString(),
+            ]
+              .sort()
+              .join("-");
+
+            if (!combinationStats.has(key)) {
+              combinationStats.set(key, {
+                players: [
+                  { id: playerId.toString(), name: "", picture: "", color: "" },
+                  {
+                    id: teammates[i]._id.toString(),
+                    name: teammates[i].name,
+                    picture: teammates[i].picture,
+                    color: teammates[i].color,
+                  },
+                  {
+                    id: teammates[j]._id.toString(),
+                    name: teammates[j].name,
+                    picture: teammates[j].picture,
+                    color: teammates[j].color,
+                  },
+                ],
+                wins: 0,
+                losses: 0,
+                totalGames: 0,
+              });
+            }
+
+            const stat = combinationStats.get(key);
+            stat.totalGames++;
+            if (isWin) stat.wins++;
+            else stat.losses++;
+          }
+        }
+      }
+    });
+
+    // Fill in the main player's info
+    const player = await Player.findById(playerId);
+    combinationStats.forEach((stat) => {
+      const mainPlayer = stat.players.find(p => p.id === playerId.toString());
+      if (mainPlayer && player) {
+        mainPlayer.name = player.name;
+        mainPlayer.picture = player.picture;
+        mainPlayer.color = player.color;
+      }
+    });
+
+    // Convert to array and add winRate
+    const results = Array.from(combinationStats.values()).map((stat) => ({
+      ...stat,
+      winRate: stat.totalGames > 0 ? (stat.wins / stat.totalGames) * 100 : 0,
+    }));
+
+    // Sort by totalGames desc, then by winRate desc
+    results.sort((a, b) => {
+      if (b.totalGames !== a.totalGames) {
+        return b.totalGames - a.totalGames;
+      }
+      return b.winRate - a.winRate;
+    });
+
+    return results;
+  }
+
+  // Get player's position history across all series
+  async getPlayerPositionHistory(playerId) {
+    const Series = require("../models/Series");
+    
+    // Get all series sorted by name
+    const allSeries = await Series.find().sort({ name: 1 });
+    
+    if (allSeries.length === 0) {
+      return {};
+    }
+
+    const positionCounts = {};
+    
+    // For each series, calculate player's rank
+    for (const series of allSeries) {
+      const seriesStats = await this.getSeriesStats(series._id.toString());
+      
+      // Find player's rank in this series
+      const playerRank = seriesStats.findIndex(s => s.playerId === playerId.toString()) + 1;
+      
+      if (playerRank > 0) {
+        // Player participated in this series
+        positionCounts[playerRank] = (positionCounts[playerRank] || 0) + 1;
+      }
+    }
+
+    return positionCounts;
+  }
+
+  // Get player's position history for a range of series
+  async getPlayerPositionHistoryRange(playerId, fromSeriesId, toSeriesId) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
+    const fromSeriesObjectId = new mongoose.Types.ObjectId(fromSeriesId);
+    const toSeriesObjectId = new mongoose.Types.ObjectId(toSeriesId);
+
+    // Get series in range
+    const seriesInRange = await Series.find({
+      _id: {
+        $gte: fromSeriesObjectId,
+        $lte: toSeriesObjectId
+      }
+    }).sort({ name: 1 });
+
+    if (seriesInRange.length === 0) {
+      return {};
+    }
+
+    const positionCounts = {};
+    
+    // For each series, calculate player's rank
+    for (const series of seriesInRange) {
+      const seriesStats = await this.getSeriesStats(series._id.toString());
+      
+      // Find player's rank in this series
+      const playerRank = seriesStats.findIndex(s => s.playerId === playerId.toString()) + 1;
+      
+      if (playerRank > 0) {
+        // Player participated in this series
+        positionCounts[playerRank] = (positionCounts[playerRank] || 0) + 1;
+      }
+    }
+
+    return positionCounts;
+  }
 }
 
 module.exports = new StatsService();
