@@ -139,4 +139,41 @@ router.get("/:playerId/position-history", async (req, res) => {
   }
 });
 
+// GET /api/players/:playerId/game-progression?fromSeriesId=xxx&toSeriesId=yyy
+router.get("/:playerId/game-progression", async (req, res) => {
+  try {
+    const { playerId } = req.params;
+    const { fromSeriesId, toSeriesId } = req.query;
+
+    // Determine cache key
+    let cacheKey;
+    if (fromSeriesId && toSeriesId) {
+      cacheKey = cacheManager.generateKey("player-game-progression", playerId, `${fromSeriesId}-${toSeriesId}`);
+    } else {
+      cacheKey = cacheManager.generateKey("player-game-progression", playerId, "all");
+    }
+
+    // Check cache first
+    const cached = cacheManager.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    // Calculate game progression
+    let progression;
+    if (fromSeriesId && toSeriesId) {
+      progression = await statsService.getPlayerGameProgressionRange(playerId, fromSeriesId, toSeriesId);
+    } else {
+      progression = await statsService.getPlayerGameProgression(playerId);
+    }
+
+    // Cache the result
+    cacheManager.set(cacheKey, progression);
+
+    res.status(200).json(progression);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 module.exports = router;

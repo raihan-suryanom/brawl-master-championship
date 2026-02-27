@@ -75,8 +75,8 @@ router.post("/", async (req, res) => {
     // Clear all player-related caches
     cacheManager.deletePattern('^player-stats:');
     cacheManager.deletePattern('^player-combinations:');
-    cacheManager.deletePattern('^player-full-profile:');
     cacheManager.deletePattern('^player-position-history:');
+    cacheManager.deletePattern('^player-game-progression:');
     
     console.log('[Cache] Invalidation complete');
 

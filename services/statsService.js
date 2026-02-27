@@ -959,6 +959,213 @@ class StatsService {
 
     return positionCounts;
   }
+
+  // Get player's game-by-game points progression across all series
+  async getPlayerGameProgression(playerId) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
+    const playerObjectId = new mongoose.Types.ObjectId(playerId);
+
+    // Get all series sorted by name
+    const allSeries = await Series.find().sort({ name: 1 });
+    
+    if (allSeries.length === 0) {
+      return [];
+    }
+
+    const seriesIds = allSeries.map(s => s._id);
+
+    // Fetch ALL games where player participated
+    const games = await Game.find({
+      seriesId: { $in: seriesIds },
+      $or: [
+        { teamBlue: playerObjectId },
+        { teamRed: playerObjectId }
+      ]
+    })
+      .populate("teamBlue", "name picture color")
+      .populate("teamRed", "name picture color")
+      .populate("seriesId", "name")
+      .lean();
+
+    if (games.length === 0) {
+      return [];
+    }
+
+    // Sort by series name then game number (chronological order)
+    games.sort((a, b) => {
+      const seriesAName = a.seriesId?.name || "";
+      const seriesBName = b.seriesId?.name || "";
+      
+      if (seriesAName < seriesBName) return -1;
+      if (seriesAName > seriesBName) return 1;
+      
+      return a.gameNumber - b.gameNumber;
+    });
+
+    // Calculate progression with running W, WS, LS
+    const progression = [];
+    let totalWins = 0;
+    let currentWinStreak = 0;
+    let currentLoseStreak = 0;
+    let highestWinStreak = 0;
+    let highestLoseStreak = 0;
+    let gameIndex = 1;
+
+    games.forEach(game => {
+      const isInTeamBlue = game.teamBlue.some(p => p._id.toString() === playerId.toString());
+      const isInTeamRed = game.teamRed.some(p => p._id.toString() === playerId.toString());
+      
+      const isWin = 
+        (isInTeamBlue && game.winner === "teamBlue") ||
+        (isInTeamRed && game.winner === "teamRed");
+
+      // Update win/loss tracking
+      if (isWin) {
+        totalWins++;
+        currentWinStreak++;
+        currentLoseStreak = 0;
+        
+        if (currentWinStreak > highestWinStreak) {
+          highestWinStreak = currentWinStreak;
+        }
+      } else {
+        currentLoseStreak++;
+        currentWinStreak = 0;
+        
+        if (currentLoseStreak > highestLoseStreak) {
+          highestLoseStreak = currentLoseStreak;
+        }
+      }
+
+      // Calculate points: W + H.WS - H.LS
+      const points = totalWins + highestWinStreak - highestLoseStreak;
+
+      progression.push({
+        gameIndex,
+        gameNumber: game.gameNumber,
+        seriesName: game.seriesId?.name || "Unknown",
+        seriesId: game.seriesId?._id.toString() || "",
+        result: isWin ? "W" : "L",
+        totalWins,
+        highestWinStreak,
+        highestLoseStreak,
+        points,
+      });
+
+      gameIndex++;
+    });
+
+    return progression;
+  }
+
+  // Get player's game-by-game progression for a range of series
+  async getPlayerGameProgressionRange(playerId, fromSeriesId, toSeriesId) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
+    const playerObjectId = new mongoose.Types.ObjectId(playerId);
+    const fromSeriesObjectId = new mongoose.Types.ObjectId(fromSeriesId);
+    const toSeriesObjectId = new mongoose.Types.ObjectId(toSeriesId);
+
+    // Get series in range
+    const seriesInRange = await Series.find({
+      _id: {
+        $gte: fromSeriesObjectId,
+        $lte: toSeriesObjectId
+      }
+    }).sort({ name: 1 });
+
+    if (seriesInRange.length === 0) {
+      return [];
+    }
+
+    const seriesIds = seriesInRange.map(s => s._id);
+
+    // Fetch games from series range where player participated
+    const games = await Game.find({
+      seriesId: { $in: seriesIds },
+      $or: [
+        { teamBlue: playerObjectId },
+        { teamRed: playerObjectId }
+      ]
+    })
+      .populate("teamBlue", "name picture color")
+      .populate("teamRed", "name picture color")
+      .populate("seriesId", "name")
+      .lean();
+
+    if (games.length === 0) {
+      return [];
+    }
+
+    // Sort by series name then game number
+    games.sort((a, b) => {
+      const seriesAName = a.seriesId?.name || "";
+      const seriesBName = b.seriesId?.name || "";
+      
+      if (seriesAName < seriesBName) return -1;
+      if (seriesAName > seriesBName) return 1;
+      
+      return a.gameNumber - b.gameNumber;
+    });
+
+    // Calculate progression with running W, WS, LS
+    const progression = [];
+    let totalWins = 0;
+    let currentWinStreak = 0;
+    let currentLoseStreak = 0;
+    let highestWinStreak = 0;
+    let highestLoseStreak = 0;
+    let gameIndex = 1;
+
+    games.forEach(game => {
+      const isInTeamBlue = game.teamBlue.some(p => p._id.toString() === playerId.toString());
+      const isInTeamRed = game.teamRed.some(p => p._id.toString() === playerId.toString());
+      
+      const isWin = 
+        (isInTeamBlue && game.winner === "teamBlue") ||
+        (isInTeamRed && game.winner === "teamRed");
+
+      // Update win/loss tracking
+      if (isWin) {
+        totalWins++;
+        currentWinStreak++;
+        currentLoseStreak = 0;
+        
+        if (currentWinStreak > highestWinStreak) {
+          highestWinStreak = currentWinStreak;
+        }
+      } else {
+        currentLoseStreak++;
+        currentWinStreak = 0;
+        
+        if (currentLoseStreak > highestLoseStreak) {
+          highestLoseStreak = currentLoseStreak;
+        }
+      }
+
+      // Calculate points: W + H.WS - H.LS
+      const points = totalWins + highestWinStreak - highestLoseStreak;
+
+      progression.push({
+        gameIndex,
+        gameNumber: game.gameNumber,
+        seriesName: game.seriesId?.name || "Unknown",
+        seriesId: game.seriesId?._id.toString() || "",
+        result: isWin ? "W" : "L",
+        totalWins,
+        highestWinStreak,
+        highestLoseStreak,
+        points,
+      });
+
+      gameIndex++;
+    });
+
+    return progression;
+  }
 }
 
 module.exports = new StatsService();

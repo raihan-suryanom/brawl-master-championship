@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
+const cors = require('cors');
 const playerRoutes = require("./routes/playerRoutes");
 const seriesRoutes = require("./routes/seriesRoutes");
 const gameRoutes = require("./routes/gameRoutes");
@@ -11,6 +12,12 @@ const playerStatsRoutes = require("./routes/playerStatsRoutes");
 const app = express();
 
 app.use(express.json());
+app.use(cors({
+  origin: [
+    'http://localhost:4321',
+    'https://brawl-master.raihansuryanom.workers.dev/'
+  ]
+}));
 
 // Routes
 app.use("/api/players", playerRoutes);
