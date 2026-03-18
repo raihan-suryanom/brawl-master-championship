@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const Game = require("../models/Game");
 const Series = require("../models/Series");
 const cacheManager = require("../utils/cacheManager");
+const { validateAdminPassword } = require("../middleware/adminAuth");
 
 // GET /api/series/:seriesId/games?maxGameNumber=7
 router.get("/", async (req, res) => {
@@ -43,8 +44,8 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// POST /api/series/:seriesId/games
-router.post("/", async (req, res) => {
+// POST /api/series/:seriesId/games (PROTECTED)
+router.post("/", validateAdminPassword, async (req, res) => {
   try {
     // Validate series exists
     const series = await Series.findById(req.params.seriesId);

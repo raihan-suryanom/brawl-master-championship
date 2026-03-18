@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const Series = require("../models/Series");
 const cacheManager = require("../utils/cacheManager");
+const { validateAdminPassword } = require("../middleware/adminAuth");
 
 // GET /api/series
 router.get("/", async (req, res) => {
@@ -27,8 +28,8 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// POST /api/series
-router.post("/", async (req, res) => {
+// POST /api/series (PROTECTED)
+router.post("/", validateAdminPassword, async (req, res) => {
   try {
     const series = new Series(req.body);
     const savedSeries = await series.save();

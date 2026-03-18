@@ -9,6 +9,8 @@ const seriesStatsRoutes = require("./routes/seriesStatsRoutes");
 const seriesPtsProgressionRoutes = require("./routes/seriesPtsProgressionRoutes");
 const playerStatsRoutes = require("./routes/playerStatsRoutes");
 const aggregateStatsRoutes = require("./routes/aggregateStatsRoutes");
+const adminAuthRoutes = require("./routes/adminAuthRoutes");
+const { validateAdminPassword } = require("./middleware/adminAuth");
 
 const app = express();
 
@@ -25,8 +27,11 @@ app.use("/api/series/:seriesId/stats", seriesStatsRoutes);
 app.use("/api/series/:seriesId/pts-progression", seriesPtsProgressionRoutes);
 app.use("/api/aggregate-stats", aggregateStatsRoutes);
 
-// Cache management route (admin only - no auth for now)
-app.post("/api/admin/clear-cache", (req, res) => {
+// Admin auth routes (no password needed to validate)
+app.use("/api/admin/auth", adminAuthRoutes);
+
+// Cache management route (admin only - requires password)
+app.post("/api/admin/clear-cache", validateAdminPassword, (req, res) => {
   try {
     const cacheManager = require("./utils/cacheManager");
     const keys = cacheManager.cache.keys();
