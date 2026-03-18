@@ -3,11 +3,15 @@ const router = express.Router({ mergeParams: true });
 const statsService = require("../services/statsService");
 const cacheManager = require("../utils/cacheManager");
 
-// GET /api/series/:seriesId/pts-progression
+// GET /api/series/:seriesId/pts-progression?maxGameNumber=7
 router.get("/", async (req, res) => {
   try {
     const { seriesId } = req.params;
-    const cacheKey = cacheManager.generateKey("series-pts-progression", seriesId);
+    const { maxGameNumber } = req.query;
+    
+    const cacheKey = maxGameNumber
+      ? cacheManager.generateKey("series-pts-progression", seriesId, `max-${maxGameNumber}`)
+      : cacheManager.generateKey("series-pts-progression", seriesId);
 
     // Check cache first
     const cached = cacheManager.get(cacheKey);
@@ -15,8 +19,11 @@ router.get("/", async (req, res) => {
       return res.status(200).json(cached);
     }
 
-    // Calculate pts progression
-    const progression = await statsService.getSeriesPtsProgression(seriesId);
+    // Calculate pts progression with optional game range filter
+    const progression = await statsService.getSeriesPtsProgression(
+      seriesId,
+      maxGameNumber ? parseInt(maxGameNumber) : null
+    );
 
     // Cache the result
     cacheManager.set(cacheKey, progression);

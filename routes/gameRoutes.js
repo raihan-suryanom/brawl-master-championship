@@ -5,14 +5,21 @@ const Game = require("../models/Game");
 const Series = require("../models/Series");
 const cacheManager = require("../utils/cacheManager");
 
-// GET /api/series/:seriesId/games
+// GET /api/series/:seriesId/games?maxGameNumber=7
 router.get("/", async (req, res) => {
   try {
+    const { maxGameNumber } = req.query;
     const seriesObjectId = mongoose.Types.ObjectId.createFromHexString(req.params.seriesId);
-    const games = await Game.find({ seriesId: seriesObjectId })
+    let games = await Game.find({ seriesId: seriesObjectId })
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
       .sort({ gameNumber: 1 });
+    
+    // Filter by maxGameNumber if provided
+    if (maxGameNumber && parseInt(maxGameNumber) > 0) {
+      games = games.filter(g => g.gameNumber <= parseInt(maxGameNumber));
+    }
+    
     res.status(200).json(games);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -77,6 +84,9 @@ router.post("/", async (req, res) => {
     cacheManager.deletePattern('^player-combinations:');
     cacheManager.deletePattern('^player-position-history:');
     cacheManager.deletePattern('^player-game-progression:');
+    
+    // Clear aggregate caches
+    cacheManager.deletePattern('^aggregate-combinations:');
     
     console.log('[Cache] Invalidation complete');
 

@@ -10,7 +10,8 @@ class StatsService {
     let currentLoseStreak = 0;
     let highestWinStreak = 0;
     let highestLoseStreak = 0;
-    let firstLossGameNumber = null; // Track first loss game number
+    let firstLossGameNumber = null; // Track first loss (old tiebreaker)
+    let lastGameResult = null; // Track last game result (new tiebreaker)
     const allResults = []; // Track all game results
 
     games.forEach((game) => {
@@ -37,14 +38,16 @@ class StatsService {
         currentWinStreak++;
         currentLoseStreak = 0;
         highestWinStreak = Math.max(highestWinStreak, currentWinStreak);
+        lastGameResult = "W"; // Update last game result
       } else {
-        // Track first loss
+        // Track first loss (old tiebreaker)
         if (firstLossGameNumber === null) {
           firstLossGameNumber = game.gameNumber;
         }
         currentLoseStreak++;
         currentWinStreak = 0;
         highestLoseStreak = Math.max(highestLoseStreak, currentLoseStreak);
+        lastGameResult = "L"; // Update last game result
       }
     });
 
@@ -57,7 +60,8 @@ class StatsService {
       totalWin,
       highestWinStreak,
       highestLoseStreak,
-      firstLossGameNumber: firstLossGameNumber || 999, // 999 if never lost (perfect record)
+      firstLossGameNumber: firstLossGameNumber || 999, // Old tiebreaker (999 if never lost)
+      lastGameResult: lastGameResult || "W", // New tiebreaker
       pts,
       totalGames: games.length,
       winRate: games.length > 0 ? (totalWin / games.length) * 100 : 0,
@@ -66,16 +70,31 @@ class StatsService {
   }
 
   // Get stats for all players in a series
-  async getSeriesStats(seriesId) {
+  async getSeriesStats(seriesId, maxGameNumber = null) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
     const seriesObjectId = new mongoose.Types.ObjectId(seriesId);
-    const games = await Game.find({ seriesId: seriesObjectId })
+    let games = await Game.find({ seriesId: seriesObjectId })
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
       .sort({ gameNumber: 1 });
 
+    // Filter by maxGameNumber if provided
+    if (maxGameNumber && maxGameNumber > 0) {
+      games = games.filter(g => g.gameNumber <= maxGameNumber);
+    }
+
     if (games.length === 0) {
       return [];
     }
+
+    // Determine which tiebreaker to use
+    // First 16 series (by createdAt) use old rule (firstLossGameNumber)
+    // Series 17+ use new rule (lastGameResult)
+    const allSeries = await Series.find().sort({ createdAt: 1 }).lean();
+    const seriesIndex = allSeries.findIndex(s => s._id.toString() === seriesId.toString());
+    const useOldTiebreaker = seriesIndex < 16; // First 16 series (index 0-15)
 
     // Get unique players from all games
     const playerIds = new Set();
@@ -112,7 +131,7 @@ class StatsService {
     // 3. Win Streak (highest)
     // 4. Win Rate (highest)
     // 5. Lose Streak (lowest)
-    // 6. First Loss Game Number (highest = loss later)
+    // 6. Conditional: First Loss (old) OR Last Game Result (new)
     stats.sort((a, b) => {
       // 1. Pts (descending)
       if (b.pts !== a.pts) return b.pts - a.pts;
@@ -135,8 +154,18 @@ class StatsService {
         return a.highestLoseStreak - b.highestLoseStreak;
       }
       
-      // 6. First Loss Game Number (descending - higher is better)
-      return b.firstLossGameNumber - a.firstLossGameNumber;
+      // 6. Conditional tiebreaker based on series order
+      if (useOldTiebreaker) {
+        // Series 1-16: First Loss Game Number (higher is better)
+        return b.firstLossGameNumber - a.firstLossGameNumber;
+      } else {
+        // Series 17+: Last Game Result (W > L)
+        if (a.lastGameResult !== b.lastGameResult) {
+          return a.lastGameResult === "W" ? -1 : 1;
+        }
+      }
+      
+      return 0;
     });
 
     // Calculate zones based on remaining games
@@ -144,16 +173,25 @@ class StatsService {
     const gamesPlayed = games.length;
     const gamesRemaining = totalGamesInSeries - gamesPlayed;
 
-    // Calculate max possible pts for each player
+    // Calculate max and min possible pts for each player
     stats.forEach((stat) => {
-      // Max possible: current wins + all remaining games win
-      const maxWin = stat.totalWin + gamesRemaining;
-      // Max WS: current WS + all remaining games (if they win all)
-      const maxWS = stat.highestWinStreak + gamesRemaining;
-      // LS stays the same (best case: no more losses)
-      const maxLS = stat.highestLoseStreak;
+      // MAX POSSIBLE PTS (Best Case Scenario)
+      // - Win all remaining games
+      // - Win streak could reach gamesRemaining (if better than current)
+      // - Lose streak stays same (no more losses)
+      const maxTotalWin = stat.totalWin + gamesRemaining;
+      const maxWinStreak = Math.max(stat.highestWinStreak, gamesRemaining);
+      const minLoseStreak = stat.highestLoseStreak;
+      stat.maxPossiblePts = maxTotalWin + maxWinStreak - minLoseStreak;
       
-      stat.maxPossiblePts = maxWin + maxWS - maxLS;
+      // MIN POSSIBLE PTS (Worst Case Scenario)
+      // - Lose all remaining games
+      // - Win streak stays same (no improvement)
+      // - Lose streak could extend by gamesRemaining
+      const minTotalWin = stat.totalWin;
+      const minWinStreak = stat.highestWinStreak;
+      const maxLoseStreak = Math.max(stat.highestLoseStreak, gamesRemaining);
+      stat.minPossiblePts = minTotalWin + minWinStreak - maxLoseStreak;
     });
 
     // Determine zones
@@ -171,32 +209,36 @@ class StatsService {
         else if (rank >= 2 && rank <= 5) stat.zone = "safe";
         else if (isLast) stat.zone = "last";
       } else {
-        // Series ongoing - calculate dynamic zones
+        // Series ongoing - calculate dynamic zones using min/max possible pts
         
-        // Check if player is guaranteed champion (green)
+        // Check if player is GUARANTEED champion (green)
         if (isFirst) {
-          // Check if no one else can catch up
-          const canBeCaught = stats.slice(1).some(other => other.maxPossiblePts >= stat.pts);
-          if (!canBeCaught) {
+          // Guaranteed if no one else's BEST can beat their WORST
+          const guaranteed = stats.slice(1).every(
+            other => other.maxPossiblePts < stat.minPossiblePts
+          );
+          if (guaranteed) {
             stat.zone = "champion";
           }
         }
 
-        // Check if player is guaranteed last place (red)
+        // Check if player is GUARANTEED last place (red)
         if (isLast) {
-          // Check if they can't catch anyone above them
-          const canCatchUp = stats.slice(0, -1).some(other => stat.maxPossiblePts >= other.pts);
-          if (!canCatchUp) {
+          // Guaranteed if their BEST can't catch anyone's WORST
+          const stuck = stats.slice(0, -1).every(
+            other => stat.maxPossiblePts < other.minPossiblePts
+          );
+          if (stuck) {
             stat.zone = "last";
           }
         }
 
-        // Check if player is safe (yellow) - not champion yet but can't be last
+        // Check if player is SAFE (yellow) - can't fall to last
         if (stat.zone === "none" && !isLast) {
           const lastPlayer = stats[stats.length - 1];
-          // Safe if they can't fall to last place
-          const canFallToLast = lastPlayer.maxPossiblePts >= stat.pts;
-          if (!canFallToLast) {
+          // Safe if last player's BEST can't catch their WORST
+          const safe = lastPlayer.maxPossiblePts < stat.minPossiblePts;
+          if (safe) {
             stat.zone = "safe";
           }
         }
@@ -207,12 +249,17 @@ class StatsService {
   }
 
   // Get pts progression per game for area chart visualization
-  async getSeriesPtsProgression(seriesId) {
+  async getSeriesPtsProgression(seriesId, maxGameNumber = null) {
     const seriesObjectId = new mongoose.Types.ObjectId(seriesId);
-    const games = await Game.find({ seriesId: seriesObjectId })
+    let games = await Game.find({ seriesId: seriesObjectId })
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
       .sort({ gameNumber: 1 });
+
+    // Filter by maxGameNumber if provided
+    if (maxGameNumber && maxGameNumber > 0) {
+      games = games.filter(g => g.gameNumber <= maxGameNumber);
+    }
 
     if (games.length === 0) {
       return [];
@@ -310,18 +357,18 @@ class StatsService {
     const games = await Game.find(query)
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
-      .populate("seriesId", "name") // Populate series to get name
+      .populate("seriesId", "name createdAt") // Populate series to get name
       .lean(); // Use lean for better performance
 
     // Sort by series name first, then by gameNumber
     // This ensures cross-series streaks are calculated correctly
     games.sort((a, b) => {
-      const seriesAName = a.seriesId?.name || "";
-      const seriesBName = b.seriesId?.name || "";
+      const seriesADate = a.seriesId?.createdAt || new Date(0);
+      const seriesBDate = b.seriesId?.createdAt || new Date(0);
       
       // First sort by series name (alphabetical/numerical)
-      if (seriesAName < seriesBName) return -1;
-      if (seriesAName > seriesBName) return 1;
+      if (seriesADate < seriesBDate) return -1;
+      if (seriesADate > seriesBDate) return 1;
       
       // If same series, sort by game number
       return a.gameNumber - b.gameNumber;
@@ -361,16 +408,16 @@ class StatsService {
     const games = await Game.find(query)
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
-      .populate("seriesId", "name")
+      .populate("seriesId", "name createdAt")
       .lean();
 
     // Sort by series name first, then by gameNumber
     games.sort((a, b) => {
-      const seriesAName = a.seriesId?.name || "";
-      const seriesBName = b.seriesId?.name || "";
+      const seriesADate = a.seriesId?.createdAt || new Date(0);
+      const seriesBDate = b.seriesId?.createdAt || new Date(0);
       
-      if (seriesAName < seriesBName) return -1;
-      if (seriesAName > seriesBName) return 1;
+      if (seriesADate < seriesBDate) return -1;
+      if (seriesADate > seriesBDate) return 1;
       
       return a.gameNumber - b.gameNumber;
     });
@@ -521,13 +568,13 @@ class StatsService {
     const fromSeriesObjectId = new mongoose.Types.ObjectId(fromSeriesId);
     const toSeriesObjectId = new mongoose.Types.ObjectId(toSeriesId);
 
-    // Get all series in the range (sorted by name for sequential order)
+    // Get all series in the range (sorted by createdAt for chronological order)
     const seriesInRange = await Series.find({
       _id: {
         $gte: fromSeriesObjectId,
         $lte: toSeriesObjectId
       }
-    }).sort({ name: 1 });
+    }).sort({ createdAt: 1 });
 
     if (seriesInRange.length === 0) {
       return {
@@ -539,10 +586,13 @@ class StatsService {
         highestWinStreak: 0,
         highestLoseStreak: 0,
         firstLossGameNumber: 999,
+        lastGameResult: "W",
         pts: 0,
         totalGames: 0,
         winRate: 0,
         lastFiveGames: [],
+        minPossiblePts: 0,
+        maxPossiblePts: 0,
       };
     }
 
@@ -560,16 +610,16 @@ class StatsService {
     const games = await Game.find(query)
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
-      .populate("seriesId", "name")
+      .populate("seriesId", "name createdAt")
       .lean();
 
     // Sort by series name then game number
     games.sort((a, b) => {
-      const seriesAName = a.seriesId?.name || "";
-      const seriesBName = b.seriesId?.name || "";
+      const seriesADate = a.seriesId?.createdAt || new Date(0);
+      const seriesBDate = b.seriesId?.createdAt || new Date(0);
       
-      if (seriesAName < seriesBName) return -1;
-      if (seriesAName > seriesBName) return 1;
+      if (seriesADate < seriesBDate) return -1;
+      if (seriesADate > seriesBDate) return 1;
       
       return a.gameNumber - b.gameNumber;
     });
@@ -590,10 +640,13 @@ class StatsService {
         highestWinStreak: 0,
         highestLoseStreak: 0,
         firstLossGameNumber: 999,
+        lastGameResult: "W",
         pts: 0,
         totalGames: 0,
         winRate: 0,
         lastFiveGames: [],
+        minPossiblePts: 0,
+        maxPossiblePts: 0,
       };
     }
 
@@ -623,7 +676,7 @@ class StatsService {
         $gte: fromSeriesObjectId,
         $lte: toSeriesObjectId
       }
-    }).sort({ name: 1 });
+    }).sort({ createdAt: 1 });
 
     if (seriesInRange.length === 0) {
       return [];
@@ -643,16 +696,16 @@ class StatsService {
     const games = await Game.find(query)
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
-      .populate("seriesId", "name")
+      .populate("seriesId", "name createdAt")
       .lean();
 
     // Sort games
     games.sort((a, b) => {
-      const seriesAName = a.seriesId?.name || "";
-      const seriesBName = b.seriesId?.name || "";
+      const seriesADate = a.seriesId?.createdAt || new Date(0);
+      const seriesBDate = b.seriesId?.createdAt || new Date(0);
       
-      if (seriesAName < seriesBName) return -1;
-      if (seriesAName > seriesBName) return 1;
+      if (seriesADate < seriesBDate) return -1;
+      if (seriesADate > seriesBDate) return 1;
       
       return a.gameNumber - b.gameNumber;
     });
@@ -790,7 +843,7 @@ class StatsService {
     const Series = require("../models/Series");
     
     // Get all series sorted by name
-    const allSeries = await Series.find().sort({ name: 1 });
+    const allSeries = await Series.find().sort({ createdAt: 1 });
     
     if (allSeries.length === 0) {
       return {};
@@ -809,7 +862,7 @@ class StatsService {
     })
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
-      .populate("seriesId", "name")
+      .populate("seriesId", "name createdAt")
       .lean();
 
     if (games.length === 0) {
@@ -854,7 +907,8 @@ class StatsService {
         if (b.highestWinStreak !== a.highestWinStreak) return b.highestWinStreak - a.highestWinStreak;
         if (Math.abs(b.winRate - a.winRate) > 0.01) return b.winRate - a.winRate;
         if (a.highestLoseStreak !== b.highestLoseStreak) return a.highestLoseStreak - b.highestLoseStreak;
-        return b.firstLossGameNumber - a.firstLossGameNumber;
+        if (a.lastGameResult !== b.lastGameResult) return a.lastGameResult === "W" ? -1 : 1;
+        return 0;
       });
 
       // Find player's rank
@@ -882,7 +936,7 @@ class StatsService {
         $gte: fromSeriesObjectId,
         $lte: toSeriesObjectId
       }
-    }).sort({ name: 1 });
+    }).sort({ createdAt: 1 });
 
     if (seriesInRange.length === 0) {
       return {};
@@ -901,7 +955,7 @@ class StatsService {
     })
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
-      .populate("seriesId", "name")
+      .populate("seriesId", "name createdAt")
       .lean();
 
     if (games.length === 0) {
@@ -946,7 +1000,8 @@ class StatsService {
         if (b.highestWinStreak !== a.highestWinStreak) return b.highestWinStreak - a.highestWinStreak;
         if (Math.abs(b.winRate - a.winRate) > 0.01) return b.winRate - a.winRate;
         if (a.highestLoseStreak !== b.highestLoseStreak) return a.highestLoseStreak - b.highestLoseStreak;
-        return b.firstLossGameNumber - a.firstLossGameNumber;
+        if (a.lastGameResult !== b.lastGameResult) return a.lastGameResult === "W" ? -1 : 1;
+        return 0;
       });
 
       // Find player's rank
@@ -968,7 +1023,7 @@ class StatsService {
     const playerObjectId = new mongoose.Types.ObjectId(playerId);
 
     // Get all series sorted by name
-    const allSeries = await Series.find().sort({ name: 1 });
+    const allSeries = await Series.find().sort({ createdAt: 1 });
     
     if (allSeries.length === 0) {
       return [];
@@ -986,7 +1041,7 @@ class StatsService {
     })
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
-      .populate("seriesId", "name")
+      .populate("seriesId", "name createdAt")
       .lean();
 
     if (games.length === 0) {
@@ -995,11 +1050,11 @@ class StatsService {
 
     // Sort by series name then game number (chronological order)
     games.sort((a, b) => {
-      const seriesAName = a.seriesId?.name || "";
-      const seriesBName = b.seriesId?.name || "";
+      const seriesADate = a.seriesId?.createdAt || new Date(0);
+      const seriesBDate = b.seriesId?.createdAt || new Date(0);
       
-      if (seriesAName < seriesBName) return -1;
-      if (seriesAName > seriesBName) return 1;
+      if (seriesADate < seriesBDate) return -1;
+      if (seriesADate > seriesBDate) return 1;
       
       return a.gameNumber - b.gameNumber;
     });
@@ -1075,7 +1130,7 @@ class StatsService {
         $gte: fromSeriesObjectId,
         $lte: toSeriesObjectId
       }
-    }).sort({ name: 1 });
+    }).sort({ createdAt: 1 });
 
     if (seriesInRange.length === 0) {
       return [];
@@ -1093,7 +1148,7 @@ class StatsService {
     })
       .populate("teamBlue", "name picture color")
       .populate("teamRed", "name picture color")
-      .populate("seriesId", "name")
+      .populate("seriesId", "name createdAt")
       .lean();
 
     if (games.length === 0) {
@@ -1102,11 +1157,11 @@ class StatsService {
 
     // Sort by series name then game number
     games.sort((a, b) => {
-      const seriesAName = a.seriesId?.name || "";
-      const seriesBName = b.seriesId?.name || "";
+      const seriesADate = a.seriesId?.createdAt || new Date(0);
+      const seriesBDate = b.seriesId?.createdAt || new Date(0);
       
-      if (seriesAName < seriesBName) return -1;
-      if (seriesAName > seriesBName) return 1;
+      if (seriesADate < seriesBDate) return -1;
+      if (seriesADate > seriesBDate) return 1;
       
       return a.gameNumber - b.gameNumber;
     });
@@ -1165,6 +1220,202 @@ class StatsService {
     });
 
     return progression;
+  }
+
+  // Get aggregate best combinations across all series (or filtered range)
+  async getAggregateBestCombinations(combinationSize = 2) {
+    const mongoose = require("mongoose");
+    
+    // Get all games
+    const games = await Game.find()
+      .populate("teamBlue", "name picture color")
+      .populate("teamRed", "name picture color")
+      .populate("seriesId", "name createdAt")
+      .lean();
+
+    if (games.length === 0) {
+      return [];
+    }
+
+    // Sort by series createdAt, then gameNumber
+    games.sort((a, b) => {
+      const dateA = a.seriesId?.createdAt || new Date(0);
+      const dateB = b.seriesId?.createdAt || new Date(0);
+      
+      if (dateA < dateB) return -1;
+      if (dateA > dateB) return 1;
+      
+      return a.gameNumber - b.gameNumber;
+    });
+
+    return this._calculateCombinations(games, combinationSize);
+  }
+
+  async getAggregateBestCombinationsRange(combinationSize = 2, fromSeriesId, toSeriesId) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
+    const fromSeriesObjectId = new mongoose.Types.ObjectId(fromSeriesId);
+    const toSeriesObjectId = new mongoose.Types.ObjectId(toSeriesId);
+
+    // Get series in range
+    const seriesInRange = await Series.find({
+      _id: {
+        $gte: fromSeriesObjectId,
+        $lte: toSeriesObjectId
+      }
+    });
+
+    if (seriesInRange.length === 0) {
+      return [];
+    }
+
+    const seriesIds = seriesInRange.map(s => s._id);
+
+    // Get games from series range
+    const games = await Game.find({
+      seriesId: { $in: seriesIds }
+    })
+      .populate("teamBlue", "name picture color")
+      .populate("teamRed", "name picture color")
+      .populate("seriesId", "name createdAt")
+      .lean();
+
+    if (games.length === 0) {
+      return [];
+    }
+
+    // Sort by series createdAt, then gameNumber
+    games.sort((a, b) => {
+      const dateA = a.seriesId?.createdAt || new Date(0);
+      const dateB = b.seriesId?.createdAt || new Date(0);
+      
+      if (dateA < dateB) return -1;
+      if (dateA > dateB) return 1;
+      
+      return a.gameNumber - b.gameNumber;
+    });
+
+    return this._calculateCombinations(games, combinationSize);
+  }
+
+  // Helper method to calculate combinations from games
+  _calculateCombinations(games, combinationSize) {
+    const combinationStats = new Map();
+
+    games.forEach(game => {
+      const teamBlue = game.teamBlue || [];
+      const teamRed = game.teamRed || [];
+      const allPlayers = [...teamBlue, ...teamRed];
+
+      // Generate all combinations of the specified size
+      const combinations = this._getCombinations(allPlayers, combinationSize);
+
+      combinations.forEach(combo => {
+        // Create a unique key for this combination (sorted player IDs)
+        const key = combo.map(p => p._id.toString()).sort().join("-");
+
+        // Check if all players in this combo are on the same team
+        const allInBlue = combo.every(p => 
+          teamBlue.some(tp => tp._id.toString() === p._id.toString())
+        );
+        const allInRed = combo.every(p => 
+          teamRed.some(tp => tp._id.toString() === p._id.toString())
+        );
+
+        // Only count if they're all on the same team (they played together)
+        if (allInBlue || allInRed) {
+          const isWin = (allInBlue && game.winner === "teamBlue") || 
+                       (allInRed && game.winner === "teamRed");
+
+          if (!combinationStats.has(key)) {
+            combinationStats.set(key, {
+              players: combo.map(p => ({
+                id: p._id.toString(),
+                name: p.name,
+                picture: p.picture,
+                color: p.color,
+              })),
+              wins: 0,
+              losses: 0,
+              totalGames: 0,
+            });
+          }
+
+          const stat = combinationStats.get(key);
+          stat.totalGames++;
+          if (isWin) stat.wins++;
+          else stat.losses++;
+        }
+      });
+    });
+
+    // Convert to array and add winRate
+    const results = Array.from(combinationStats.values()).map((stat) => ({
+      ...stat,
+      winRate: stat.totalGames > 0 ? (stat.wins / stat.totalGames) * 100 : 0,
+    }));
+
+    // Filter: Only combinations with >= 5 games
+    const MIN_GAMES = 5;
+    let filteredResults = results.filter(stat => stat.totalGames >= MIN_GAMES);
+
+    // Edge case: If no combinations meet threshold, show top 3 with warning
+    if (filteredResults.length === 0 && results.length > 0) {
+      filteredResults = results
+        .sort((a, b) => b.totalGames - a.totalGames)
+        .slice(0, 3)
+        .map(stat => ({
+          ...stat,
+          insufficientData: true, // Flag for frontend warning
+        }));
+    }
+
+    // Calculate weighted score for qualified combinations
+    const maxGames = Math.max(...filteredResults.map(r => r.totalGames), 1);
+    
+    const scoredResults = filteredResults.map(stat => ({
+      ...stat,
+      score: (stat.winRate * 0.7) + ((stat.totalGames / maxGames) * 30),
+    }));
+
+    // Sort by: score DESC, totalGames DESC (tiebreaker), wins DESC (2nd tiebreaker)
+    scoredResults.sort((a, b) => {
+      // Primary: Score
+      if (Math.abs(b.score - a.score) > 0.01) { // Handle floating point
+        return b.score - a.score;
+      }
+      // Tiebreaker 1: Total games
+      if (b.totalGames !== a.totalGames) {
+        return b.totalGames - a.totalGames;
+      }
+      // Tiebreaker 2: Wins
+      return b.wins - a.wins;
+    });
+
+    // Return top 15
+    return scoredResults.slice(0, 15);
+  }
+
+  // Helper to get all combinations of size k from array
+  _getCombinations(arr, k) {
+    const results = [];
+    
+    const combine = (start, combo) => {
+      if (combo.length === k) {
+        results.push([...combo]);
+        return;
+      }
+      
+      for (let i = start; i < arr.length; i++) {
+        combo.push(arr[i]);
+        combine(i + 1, combo);
+        combo.pop();
+      }
+    };
+    
+    combine(0, []);
+    return results;
   }
 }
 
