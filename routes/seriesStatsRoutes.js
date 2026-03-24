@@ -35,4 +35,30 @@ router.get("/", async (req, res) => {
   }
 });
 
+// GET /api/series/:seriesId/difficulty
+router.get("/difficulty", async (req, res) => {
+  try {
+    const { seriesId } = req.params;
+
+    // Cache key
+    const cacheKey = cacheManager.generateKey("series-difficulty", seriesId);
+
+    // Check cache first
+    const cached = cacheManager.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    // Calculate difficulty
+    const difficulty = await statsService.calculateSeriesDifficulty(seriesId);
+
+    // Cache the result
+    cacheManager.set(cacheKey, difficulty);
+
+    res.status(200).json(difficulty);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 module.exports = router;

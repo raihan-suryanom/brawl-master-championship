@@ -79,15 +79,20 @@ router.post("/", validateAdminPassword, async (req, res) => {
     // Clear all series-related caches
     cacheManager.deletePattern('^series-stats:');
     cacheManager.deletePattern('^series-pts-progression:');
+    cacheManager.deletePattern('^series-difficulty:');
     
     // Clear all player-related caches
     cacheManager.deletePattern('^player-stats:');
     cacheManager.deletePattern('^player-combinations:');
     cacheManager.deletePattern('^player-position-history:');
     cacheManager.deletePattern('^player-game-progression:');
+    cacheManager.deletePattern('^player-performance-trends:');
+    cacheManager.deletePattern('^player-clutch-stats:');
+    cacheManager.deletePattern('^player-comeback-analysis:');
     
     // Clear aggregate caches
     cacheManager.deletePattern('^aggregate-combinations:');
+    cacheManager.deletePattern('^aggregate-series-difficulty:');
     
     console.log('[Cache] Invalidation complete');
 

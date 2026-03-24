@@ -245,6 +245,89 @@ class StatsService {
       }
     });
 
+    // Calculate position changes (current game vs previous game)
+    // Only skip if it's game 1 or less
+    const currentMaxGame = maxGameNumber || games.length;
+    if (currentMaxGame > 1) {
+      // Get previous game stats (one game before current)
+      const prevGames = games.filter(g => g.gameNumber <= currentMaxGame - 1);
+      const prevStats = [];
+      
+      for (const playerId of playerIds) {
+        const playerStats = this.calculatePlayerStats(playerId, prevGames);
+        prevStats.push({ 
+          playerId, 
+          pts: playerStats.pts,
+          totalWin: playerStats.totalWin,
+          highestWinStreak: playerStats.highestWinStreak,
+          highestLoseStreak: playerStats.highestLoseStreak,
+          winRate: playerStats.winRate,
+          firstLossGameNumber: playerStats.firstLossGameNumber,
+          lastGameResult: playerStats.lastGameResult,
+        });
+      }
+
+      // Sort previous stats by SAME tiebreaker rules as current
+      prevStats.sort((a, b) => {
+        // 1. Pts (descending)
+        if (b.pts !== a.pts) return b.pts - a.pts;
+        
+        // 2. Total Win (descending)
+        if (b.totalWin !== a.totalWin) return b.totalWin - a.totalWin;
+        
+        // 3. Win Streak (descending)
+        if (b.highestWinStreak !== a.highestWinStreak) {
+          return b.highestWinStreak - a.highestWinStreak;
+        }
+        
+        // 4. Win Rate (descending)
+        if (Math.abs(b.winRate - a.winRate) > 0.01) {
+          return b.winRate - a.winRate;
+        }
+        
+        // 5. Lose Streak (ascending - lower is better)
+        if (a.highestLoseStreak !== b.highestLoseStreak) {
+          return a.highestLoseStreak - b.highestLoseStreak;
+        }
+        
+        // 6. Conditional tiebreaker
+        if (useOldTiebreaker) {
+          // Series 1-16: First Loss Game Number (higher is better)
+          return b.firstLossGameNumber - a.firstLossGameNumber;
+        } else {
+          // Series 17+: Last Game Result (W > L)
+          if (a.lastGameResult !== b.lastGameResult) {
+            return a.lastGameResult === "W" ? -1 : 1;
+          }
+        }
+        
+        return 0;
+      });
+
+      // Create position map for previous game
+      const prevPositions = new Map();
+      prevStats.forEach((stat, index) => {
+        prevPositions.set(stat.playerId, index + 1);
+      });
+
+      // Add position change to current stats
+      stats.forEach((stat, currentIndex) => {
+        const currentPosition = currentIndex + 1;
+        const previousPosition = prevPositions.get(stat.playerId);
+        
+        if (previousPosition) {
+          stat.positionChange = previousPosition - currentPosition; // Positive = moved up, Negative = moved down
+        } else {
+          stat.positionChange = 0; // New player or first game
+        }
+      });
+    } else {
+      // First game or no maxGameNumber - no position change
+      stats.forEach(stat => {
+        stat.positionChange = 0;
+      });
+    }
+
     return stats;
   }
 
@@ -842,7 +925,7 @@ class StatsService {
     const mongoose = require("mongoose");
     const Series = require("../models/Series");
     
-    // Get all series sorted by name
+    // Get all series sorted by createdAt
     const allSeries = await Series.find().sort({ createdAt: 1 });
     
     if (allSeries.length === 0) {
@@ -882,7 +965,15 @@ class StatsService {
     // Calculate stats for each series and determine player rank
     const positionCounts = {};
 
-    for (const [seriesId, seriesGames] of gamesBySeries) {
+    allSeries.forEach((series, seriesIndex) => {
+      const seriesId = series._id.toString();
+      const seriesGames = gamesBySeries.get(seriesId);
+      
+      if (!seriesGames) return; // Player didn't participate
+      
+      // Determine which tiebreaker to use (same as getSeriesStats)
+      const useOldTiebreaker = seriesIndex < 16; // First 16 series
+
       // Sort games by game number
       seriesGames.sort((a, b) => a.gameNumber - b.gameNumber);
 
@@ -900,14 +991,40 @@ class StatsService {
         seriesStats.push({ playerId: pid, ...stats });
       }
 
-      // Sort by tiebreaker rules
+      // Sort by tiebreaker rules (MUST match getSeriesStats!)
       seriesStats.sort((a, b) => {
+        // 1. Pts (descending)
         if (b.pts !== a.pts) return b.pts - a.pts;
+        
+        // 2. Total Win (descending)
         if (b.totalWin !== a.totalWin) return b.totalWin - a.totalWin;
-        if (b.highestWinStreak !== a.highestWinStreak) return b.highestWinStreak - a.highestWinStreak;
-        if (Math.abs(b.winRate - a.winRate) > 0.01) return b.winRate - a.winRate;
-        if (a.highestLoseStreak !== b.highestLoseStreak) return a.highestLoseStreak - b.highestLoseStreak;
-        if (a.lastGameResult !== b.lastGameResult) return a.lastGameResult === "W" ? -1 : 1;
+        
+        // 3. Win Streak (descending)
+        if (b.highestWinStreak !== a.highestWinStreak) {
+          return b.highestWinStreak - a.highestWinStreak;
+        }
+        
+        // 4. Win Rate (descending)
+        if (Math.abs(b.winRate - a.winRate) > 0.01) {
+          return b.winRate - a.winRate;
+        }
+        
+        // 5. Lose Streak (ascending - lower is better)
+        if (a.highestLoseStreak !== b.highestLoseStreak) {
+          return a.highestLoseStreak - b.highestLoseStreak;
+        }
+        
+        // 6. Conditional tiebreaker (SAME AS getSeriesStats!)
+        if (useOldTiebreaker) {
+          // Series 1-16: First Loss Game Number (higher is better)
+          return b.firstLossGameNumber - a.firstLossGameNumber;
+        } else {
+          // Series 17+: Last Game Result (W > L)
+          if (a.lastGameResult !== b.lastGameResult) {
+            return a.lastGameResult === "W" ? -1 : 1;
+          }
+        }
+        
         return 0;
       });
 
@@ -917,7 +1034,7 @@ class StatsService {
       if (playerRank > 0) {
         positionCounts[playerRank] = (positionCounts[playerRank] || 0) + 1;
       }
-    }
+    });
 
     return positionCounts;
   }
@@ -930,6 +1047,9 @@ class StatsService {
     const fromSeriesObjectId = new mongoose.Types.ObjectId(fromSeriesId);
     const toSeriesObjectId = new mongoose.Types.ObjectId(toSeriesId);
 
+    // Get ALL series to determine indices
+    const allSeries = await Series.find().sort({ createdAt: 1 });
+    
     // Get series in range
     const seriesInRange = await Series.find({
       _id: {
@@ -975,7 +1095,16 @@ class StatsService {
     // Calculate stats for each series and determine player rank
     const positionCounts = {};
 
-    for (const [seriesId, seriesGames] of gamesBySeries) {
+    seriesInRange.forEach((series) => {
+      const seriesId = series._id.toString();
+      const seriesGames = gamesBySeries.get(seriesId);
+      
+      if (!seriesGames) return; // Player didn't participate
+      
+      // Determine which tiebreaker to use (SAME AS getSeriesStats!)
+      const seriesIndex = allSeries.findIndex(s => s._id.toString() === seriesId);
+      const useOldTiebreaker = seriesIndex < 16; // First 16 series
+
       // Sort games by game number
       seriesGames.sort((a, b) => a.gameNumber - b.gameNumber);
 
@@ -993,14 +1122,40 @@ class StatsService {
         seriesStats.push({ playerId: pid, ...stats });
       }
 
-      // Sort by tiebreaker rules
+      // Sort by tiebreaker rules (MUST match getSeriesStats!)
       seriesStats.sort((a, b) => {
+        // 1. Pts (descending)
         if (b.pts !== a.pts) return b.pts - a.pts;
+        
+        // 2. Total Win (descending)
         if (b.totalWin !== a.totalWin) return b.totalWin - a.totalWin;
-        if (b.highestWinStreak !== a.highestWinStreak) return b.highestWinStreak - a.highestWinStreak;
-        if (Math.abs(b.winRate - a.winRate) > 0.01) return b.winRate - a.winRate;
-        if (a.highestLoseStreak !== b.highestLoseStreak) return a.highestLoseStreak - b.highestLoseStreak;
-        if (a.lastGameResult !== b.lastGameResult) return a.lastGameResult === "W" ? -1 : 1;
+        
+        // 3. Win Streak (descending)
+        if (b.highestWinStreak !== a.highestWinStreak) {
+          return b.highestWinStreak - a.highestWinStreak;
+        }
+        
+        // 4. Win Rate (descending)
+        if (Math.abs(b.winRate - a.winRate) > 0.01) {
+          return b.winRate - a.winRate;
+        }
+        
+        // 5. Lose Streak (ascending - lower is better)
+        if (a.highestLoseStreak !== b.highestLoseStreak) {
+          return a.highestLoseStreak - b.highestLoseStreak;
+        }
+        
+        // 6. Conditional tiebreaker (SAME AS getSeriesStats!)
+        if (useOldTiebreaker) {
+          // Series 1-16: First Loss Game Number (higher is better)
+          return b.firstLossGameNumber - a.firstLossGameNumber;
+        } else {
+          // Series 17+: Last Game Result (W > L)
+          if (a.lastGameResult !== b.lastGameResult) {
+            return a.lastGameResult === "W" ? -1 : 1;
+          }
+        }
+        
         return 0;
       });
 
@@ -1010,7 +1165,7 @@ class StatsService {
       if (playerRank > 0) {
         positionCounts[playerRank] = (positionCounts[playerRank] || 0) + 1;
       }
-    }
+    }); // Close forEach
 
     return positionCounts;
   }
@@ -1416,6 +1571,780 @@ class StatsService {
     
     combine(0, []);
     return results;
+  }
+
+  // Calculate player rating based on performance
+  calculatePlayerRating(avgPts, winRate, consistency) {
+    // Rating tiers based on avg pts and win rate
+    if (avgPts >= 12 && winRate >= 80) return { tier: 'S+', label: 'Elite', color: '#FFD700' };
+    if (avgPts >= 10 && winRate >= 70) return { tier: 'S', label: 'Excellent', color: '#FF6B6B' };
+    if (avgPts >= 8 && winRate >= 60) return { tier: 'A', label: 'Very Good', color: '#4ECDC4' };
+    if (avgPts >= 6 && winRate >= 50) return { tier: 'B', label: 'Good', color: '#95E1D3' };
+    if (avgPts >= 4 && winRate >= 40) return { tier: 'C', label: 'Average', color: '#F3A683' };
+    if (avgPts >= 2 && winRate >= 30) return { tier: 'D', label: 'Below Average', color: '#F7B731' };
+    if (avgPts >= 1 && winRate >= 20) return { tier: 'E', label: 'Poor', color: '#FA8231' };
+    return { tier: 'F', label: 'Struggling', color: '#A29BFE' };
+  }
+
+  // Get player's performance trends across series
+  async getPlayerPerformanceTrends(playerId) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
+    // Get all series sorted by createdAt
+    const allSeries = await Series.find().sort({ createdAt: 1 }).lean();
+    
+    if (allSeries.length === 0) {
+      return {
+        seriesPerformance: [],
+        rating: { tier: 'F', label: 'No Data', color: '#95A5A6' },
+        avgPts: 0,
+        peakPts: 0,
+        peakSeries: null,
+        winRate: 0,
+        consistency: 0,
+        form: { trend: 'neutral', change: 0 },
+        totalSeries: 0,
+      };
+    }
+
+    const seriesIds = allSeries.map(s => s._id);
+    const playerObjectId = new mongoose.Types.ObjectId(playerId);
+
+    // Fetch ALL games where player participated
+    const games = await Game.find({
+      seriesId: { $in: seriesIds },
+      $or: [
+        { teamBlue: playerObjectId },
+        { teamRed: playerObjectId }
+      ]
+    })
+      .populate("teamBlue", "name")
+      .populate("teamRed", "name")
+      .populate("seriesId", "name createdAt")
+      .lean();
+
+    if (games.length === 0) {
+      return {
+        seriesPerformance: [],
+        rating: { tier: 'F', label: 'No Data', color: '#95A5A6' },
+        avgPts: 0,
+        peakPts: 0,
+        peakSeries: null,
+        winRate: 0,
+        consistency: 0,
+        form: { trend: 'neutral', change: 0 },
+        totalSeries: 0,
+      };
+    }
+
+    // Group games by series
+    const gamesBySeries = new Map();
+    games.forEach(game => {
+      const seriesId = game.seriesId._id.toString();
+      if (!gamesBySeries.has(seriesId)) {
+        gamesBySeries.set(seriesId, {
+          games: [],
+          seriesName: game.seriesId.name,
+          seriesDate: game.seriesId.createdAt,
+        });
+      }
+      gamesBySeries.get(seriesId).games.push(game);
+    });
+
+    // Calculate stats per series
+    const seriesPerformance = [];
+    const ptsList = [];
+    let totalWins = 0;
+    let totalGames = 0;
+
+    allSeries.forEach(series => {
+      const seriesId = series._id.toString();
+      const seriesData = gamesBySeries.get(seriesId);
+      
+      if (!seriesData) return; // Player didn't participate
+
+      const seriesGames = seriesData.games.sort((a, b) => a.gameNumber - b.gameNumber);
+      const stats = this.calculatePlayerStats(playerId.toString(), seriesGames);
+
+      seriesPerformance.push({
+        seriesId,
+        seriesName: seriesData.seriesName,
+        seriesDate: seriesData.seriesDate,
+        pts: stats.pts,
+        wins: stats.totalWin,
+        losses: stats.totalGames - stats.totalWin,
+        winRate: stats.winRate,
+        winStreak: stats.highestWinStreak,
+        loseStreak: stats.highestLoseStreak,
+      });
+
+      ptsList.push(stats.pts);
+      totalWins += stats.totalWin;
+      totalGames += stats.totalGames;
+    });
+
+    // Calculate overall metrics
+    const avgPts = ptsList.length > 0 ? ptsList.reduce((a, b) => a + b, 0) / ptsList.length : 0;
+    const peakPts = ptsList.length > 0 ? Math.max(...ptsList) : 0;
+    const peakSeriesIndex = ptsList.indexOf(peakPts);
+    const peakSeries = peakSeriesIndex >= 0 ? seriesPerformance[peakSeriesIndex].seriesName : null;
+    const winRate = totalGames > 0 ? (totalWins / totalGames) * 100 : 0;
+
+    // Calculate consistency (standard deviation)
+    const variance = ptsList.length > 0 
+      ? ptsList.reduce((sum, pts) => sum + Math.pow(pts - avgPts, 2), 0) / ptsList.length 
+      : 0;
+    const consistency = Math.sqrt(variance);
+
+    // Calculate form (last 3 series vs overall)
+    let form = { trend: 'neutral', change: 0 };
+    if (seriesPerformance.length >= 3) {
+      const lastThree = seriesPerformance.slice(-3);
+      const lastThreeAvg = lastThree.reduce((sum, s) => sum + s.pts, 0) / 3;
+      const change = ((lastThreeAvg - avgPts) / avgPts) * 100;
+      
+      if (change > 10) form = { trend: 'improving', change: Math.round(change) };
+      else if (change < -10) form = { trend: 'declining', change: Math.round(change) };
+      else form = { trend: 'stable', change: Math.round(change) };
+    }
+
+    // Calculate rating
+    const rating = this.calculatePlayerRating(avgPts, winRate, consistency);
+
+    return {
+      seriesPerformance,
+      rating,
+      avgPts: Math.round(avgPts * 10) / 10,
+      peakPts,
+      peakSeries,
+      winRate: Math.round(winRate * 10) / 10,
+      consistency: Math.round(consistency * 10) / 10,
+      form,
+      totalSeries: seriesPerformance.length,
+    };
+  }
+
+  // Get clutch performance stats (close games)
+  async getPlayerClutchStats(playerId) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
+    // Get all series
+    const allSeries = await Series.find().sort({ createdAt: 1 }).lean();
+    
+    if (allSeries.length === 0) {
+      return {
+        closeGameWinRate: 0,
+        closeGamesPlayed: 0,
+        closeGamesWon: 0,
+        clutchRating: 'N/A',
+      };
+    }
+
+    const seriesIds = allSeries.map(s => s._id);
+    const playerObjectId = new mongoose.Types.ObjectId(playerId);
+
+    // Fetch ALL games where player participated
+    const games = await Game.find({
+      seriesId: { $in: seriesIds },
+      $or: [
+        { teamBlue: playerObjectId },
+        { teamRed: playerObjectId }
+      ]
+    })
+      .populate("teamBlue", "name")
+      .populate("teamRed", "name")
+      .populate("seriesId", "name createdAt")
+      .lean();
+
+    if (games.length === 0) {
+      return {
+        closeGameWinRate: 0,
+        closeGamesPlayed: 0,
+        closeGamesWon: 0,
+        clutchRating: 'N/A',
+      };
+    }
+
+    // Group by series and calculate close games
+    const gamesBySeries = new Map();
+    games.forEach(game => {
+      const seriesId = game.seriesId._id.toString();
+      if (!gamesBySeries.has(seriesId)) {
+        gamesBySeries.set(seriesId, []);
+      }
+      gamesBySeries.get(seriesId).push(game);
+    });
+
+    let closeGamesPlayed = 0;
+    let closeGamesWon = 0;
+
+    // For each series, check final standings
+    for (const [seriesId, seriesGames] of gamesBySeries) {
+      seriesGames.sort((a, b) => a.gameNumber - b.gameNumber);
+
+      // Get all players in series
+      const playerIds = new Set();
+      seriesGames.forEach(game => {
+        game.teamBlue.forEach(p => playerIds.add(p._id.toString()));
+        game.teamRed.forEach(p => playerIds.add(p._id.toString()));
+      });
+
+      // Calculate final stats for all players
+      const finalStats = [];
+      for (const pid of playerIds) {
+        const stats = this.calculatePlayerStats(pid, seriesGames);
+        finalStats.push({ playerId: pid, pts: stats.pts });
+      }
+
+      // Sort by pts
+      finalStats.sort((a, b) => b.pts - a.pts);
+
+      // Find player's rank and pts
+      const playerIndex = finalStats.findIndex(s => s.playerId === playerId.toString());
+      if (playerIndex === -1) continue;
+
+      const playerPts = finalStats[playerIndex].pts;
+
+      // Check if close game (within 2 pts of someone above or below)
+      let isCloseGame = false;
+
+      // Check player above (if exists)
+      if (playerIndex > 0) {
+        const ptsAbove = finalStats[playerIndex - 1].pts;
+        if (Math.abs(playerPts - ptsAbove) <= 2) {
+          isCloseGame = true;
+        }
+      }
+
+      // Check player below (if exists)
+      if (playerIndex < finalStats.length - 1) {
+        const ptsBelow = finalStats[playerIndex + 1].pts;
+        if (Math.abs(playerPts - ptsBelow) <= 2) {
+          isCloseGame = true;
+        }
+      }
+
+      if (isCloseGame) {
+        closeGamesPlayed++;
+        // If player is in top half when close, consider it a "win"
+        if (playerIndex < finalStats.length / 2) {
+          closeGamesWon++;
+        }
+      }
+    }
+
+    const closeGameWinRate = closeGamesPlayed > 0 
+      ? (closeGamesWon / closeGamesPlayed) * 100 
+      : 0;
+
+    // Clutch rating
+    let clutchRating = 'N/A';
+    if (closeGamesPlayed >= 3) {
+      if (closeGameWinRate >= 70) clutchRating = 'Elite Clutch';
+      else if (closeGameWinRate >= 60) clutchRating = 'Clutch';
+      else if (closeGameWinRate >= 50) clutchRating = 'Reliable';
+      else if (closeGameWinRate >= 40) clutchRating = 'Average';
+      else clutchRating = 'Choker';
+    }
+
+    return {
+      closeGameWinRate: Math.round(closeGameWinRate * 10) / 10,
+      closeGamesPlayed,
+      closeGamesWon,
+      clutchRating,
+    };
+  }
+
+  // Calculate series difficulty rating
+  async calculateSeriesDifficulty(seriesId) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+    
+    const seriesObjectId = new mongoose.Types.ObjectId(seriesId);
+    const series = await Series.findById(seriesObjectId).lean();
+    
+    if (!series) {
+      return {
+        difficultyScore: 0,
+        difficultyTier: 'Unknown',
+        difficultyEmoji: '❓',
+        difficultyColor: '#95A5A6',
+        factors: {},
+      };
+    }
+
+    // Get all games in series
+    const games = await Game.find({ seriesId: seriesObjectId })
+      .populate("teamBlue", "name")
+      .populate("teamRed", "name")
+      .sort({ gameNumber: 1 })
+      .lean();
+
+    if (games.length === 0) {
+      return {
+        difficultyScore: 0,
+        difficultyTier: 'No Data',
+        difficultyEmoji: '❓',
+        difficultyColor: '#95A5A6',
+        factors: {},
+      };
+    }
+
+    // Get final standings
+    const playerIds = new Set();
+    games.forEach(game => {
+      game.teamBlue.forEach(p => playerIds.add(p._id.toString()));
+      game.teamRed.forEach(p => playerIds.add(p._id.toString()));
+    });
+
+    const finalStats = [];
+    for (const playerId of playerIds) {
+      const stats = this.calculatePlayerStats(playerId, games);
+      finalStats.push({ playerId, pts: stats.pts });
+    }
+    finalStats.sort((a, b) => b.pts - a.pts);
+
+    // FACTOR 1: Competitiveness Index (0-10 points)
+    // Combination of pts spread AND how many players are bunched together
+    const firstPts = finalStats[0]?.pts || 0;
+    const lastPts = finalStats[finalStats.length - 1]?.pts || 0;
+    const ptsSpread = firstPts - lastPts;
+    
+    // Also check how tight the middle pack is
+    const midPackSpread = finalStats.length >= 3 
+      ? finalStats[1].pts - finalStats[finalStats.length - 2].pts 
+      : ptsSpread;
+    
+    // Score: Smaller spread = more competitive
+    // Use average of full spread and mid pack spread for better measure
+    const avgSpread = (ptsSpread + midPackSpread) / 2;
+    const competitivenessScore = Math.max(0, Math.min(10, 10 - avgSpread));
+
+    // FACTOR 2: Close Finishes (0-10 points)
+    // Count how many players are within 2 pts of each other
+    let closePairs = 0;
+    for (let i = 0; i < finalStats.length - 1; i++) {
+      if (Math.abs(finalStats[i].pts - finalStats[i + 1].pts) <= 2) {
+        closePairs++;
+      }
+    }
+    // Score: More close pairs = harder
+    const closeFinishScore = Math.min(10, (closePairs / Math.max(1, finalStats.length - 1)) * 10);
+
+    // FACTOR 3: Pts Variance (0-10 points)
+    // Higher variance = more unpredictable = harder
+    const avgPts = finalStats.reduce((sum, s) => sum + s.pts, 0) / finalStats.length;
+    const variance = finalStats.reduce((sum, s) => sum + Math.pow(s.pts - avgPts, 2), 0) / finalStats.length;
+    const stdDev = Math.sqrt(variance);
+    
+    // Score: Higher std dev = harder (more variation)
+    const varianceScore = Math.min(10, stdDev * 2);
+
+    // FACTOR 4: Position Changes (0-10 points)
+    // Track position changes game by game
+    const positionsByGame = [];
+    for (let gameNum = 1; gameNum <= games.length; gameNum++) {
+      const gamesUpToNow = games.filter(g => g.gameNumber <= gameNum);
+      const statsAtGame = [];
+      
+      for (const playerId of playerIds) {
+        const stats = this.calculatePlayerStats(playerId, gamesUpToNow);
+        statsAtGame.push({ playerId, pts: stats.pts });
+      }
+      statsAtGame.sort((a, b) => b.pts - a.pts);
+      
+      const positions = {};
+      statsAtGame.forEach((s, idx) => {
+        positions[s.playerId] = idx + 1;
+      });
+      positionsByGame.push(positions);
+    }
+
+    // Count total position changes
+    let totalChanges = 0;
+    for (let i = 1; i < positionsByGame.length; i++) {
+      const prevPositions = positionsByGame[i - 1];
+      const currPositions = positionsByGame[i];
+      
+      for (const playerId of playerIds) {
+        if (prevPositions[playerId] !== currPositions[playerId]) {
+          totalChanges++;
+        }
+      }
+    }
+
+    // Score: More changes = more competitive
+    const maxPossibleChanges = (games.length - 1) * playerIds.size;
+    const volatilityScore = Math.min(10, (totalChanges / Math.max(1, maxPossibleChanges)) * 20);
+
+    // CALCULATE TOTAL DIFFICULTY SCORE (weighted average)
+    const weights = {
+      competitiveness: 0.35, // 35% - most important
+      closeFinish: 0.25,     // 25%
+      variance: 0.20,        // 20%
+      volatility: 0.20,      // 20%
+    };
+
+    const totalScore = 
+      competitivenessScore * weights.competitiveness +
+      closeFinishScore * weights.closeFinish +
+      varianceScore * weights.variance +
+      volatilityScore * weights.volatility;
+
+    // Determine tier
+    let tier, emoji, color;
+    if (totalScore >= 8.5) {
+      tier = 'Insane';
+      emoji = '🔥';
+      color = '#FF0000';
+    } else if (totalScore >= 7) {
+      tier = 'Brutal';
+      emoji = '💀';
+      color = '#FF4500';
+    } else if (totalScore >= 5) {
+      tier = 'Tough';
+      emoji = '⚔️';
+      color = '#FFA500';
+    } else if (totalScore >= 3) {
+      tier = 'Average';
+      emoji = '😐';
+      color = '#FFD700';
+    } else {
+      tier = 'Easy';
+      emoji = '😴';
+      color = '#90EE90';
+    }
+
+    return {
+      difficultyScore: Math.round(totalScore * 10) / 10,
+      difficultyTier: tier,
+      difficultyEmoji: emoji,
+      difficultyColor: color,
+      seriesName: series.name,
+      factors: {
+        competitiveness: {
+          value: Math.round(avgSpread * 10) / 10,
+          score: Math.round(competitivenessScore * 10) / 10,
+          description: `${ptsSpread} pts gap, ${Math.round(avgSpread * 10) / 10} avg spread`,
+        },
+        closeFinishes: {
+          value: closePairs,
+          score: Math.round(closeFinishScore * 10) / 10,
+          description: `${closePairs} close finishes (±2 pts)`,
+        },
+        ptsVariance: {
+          value: Math.round(stdDev * 10) / 10,
+          score: Math.round(varianceScore * 10) / 10,
+          description: `σ = ${Math.round(stdDev * 10) / 10} pts`,
+        },
+        positionChanges: {
+          value: totalChanges,
+          score: Math.round(volatilityScore * 10) / 10,
+          description: `${totalChanges} rank changes`,
+        },
+      },
+    };
+  }
+
+  // Get difficulty ratings for all series
+  async getAllSeriesDifficulty() {
+    const Series = require("../models/Series");
+    
+    const allSeries = await Series.find().sort({ createdAt: 1 }).lean();
+    
+    const difficulties = [];
+    for (const series of allSeries) {
+      const difficulty = await this.calculateSeriesDifficulty(series._id.toString());
+      difficulties.push({
+        seriesId: series._id.toString(),
+        ...difficulty,
+      });
+    }
+
+    // Sort by difficulty score (hardest first)
+    difficulties.sort((a, b) => b.difficultyScore - a.difficultyScore);
+
+    return difficulties;
+  }
+
+  // ===== REUSABLE HELPER FUNCTIONS =====
+  
+  /**
+   * Get position at specific game number for a player in a series
+   * @param {string} playerId - Player ID
+   * @param {Array} games - All games in series
+   * @param {number} gameNumber - Game number to check position at
+   * @returns {number} Position (1 = first, higher = worse)
+   */
+  getPlayerPositionAtGame(playerId, games, gameNumber) {
+    const gamesUpToNow = games.filter(g => g.gameNumber <= gameNumber);
+    if (gamesUpToNow.length === 0) return 0;
+
+    // Get all players
+    const playerIds = new Set();
+    gamesUpToNow.forEach(game => {
+      game.teamBlue.forEach(p => playerIds.add(p._id?.toString() || p.toString()));
+      game.teamRed.forEach(p => playerIds.add(p._id?.toString() || p.toString()));
+    });
+
+    // Calculate standings at this point
+    const standings = [];
+    for (const pid of playerIds) {
+      const stats = this.calculatePlayerStats(pid, gamesUpToNow);
+      standings.push({ playerId: pid, pts: stats.pts });
+    }
+
+    // Sort by pts (descending)
+    standings.sort((a, b) => b.pts - a.pts);
+
+    // Find player position
+    const position = standings.findIndex(s => s.playerId === playerId.toString()) + 1;
+    return position;
+  }
+
+  /**
+   * Calculate position changes for a player across a series
+   * @param {string} playerId - Player ID
+   * @param {Array} games - All games in series (sorted by gameNumber)
+   * @returns {Array} Array of {gameNumber, position, change}
+   */
+  getPositionProgression(playerId, games) {
+    if (games.length === 0) return [];
+
+    const progression = [];
+    let previousPosition = null;
+
+    for (let i = 1; i <= games.length; i++) {
+      const position = this.getPlayerPositionAtGame(playerId, games, i);
+      const change = previousPosition !== null ? position - previousPosition : 0;
+      
+      progression.push({
+        gameNumber: i,
+        position,
+        change, // Negative = improved, Positive = worsened
+      });
+
+      previousPosition = position;
+    }
+
+    return progression;
+  }
+
+  /**
+   * Detect comeback scenarios (won from behind)
+   * @param {Array} progression - Position progression array
+   * @param {number} totalPlayers - Total players in series
+   * @returns {Object} Comeback stats
+   */
+  detectComebacks(progression, totalPlayers) {
+    if (progression.length === 0) return { hadComeback: false, comebackStrength: 0 };
+
+    const midPoint = Math.floor(progression.length / 2);
+    const earlyPosition = progression[midPoint]?.position || 0;
+    const finalPosition = progression[progression.length - 1]?.position || 0;
+
+    // Comeback = started in bottom half, finished in top half
+    const bottomHalfThreshold = Math.ceil(totalPlayers / 2);
+    const topHalfThreshold = Math.ceil(totalPlayers / 2);
+
+    const startedBehind = earlyPosition > bottomHalfThreshold;
+    const finishedAhead = finalPosition <= topHalfThreshold;
+
+    if (startedBehind && finishedAhead) {
+      const comebackStrength = earlyPosition - finalPosition; // Bigger = stronger comeback
+      return { hadComeback: true, comebackStrength };
+    }
+
+    return { hadComeback: false, comebackStrength: 0 };
+  }
+
+  /**
+   * Detect throw scenarios (lost from ahead)
+   * @param {Array} progression - Position progression array
+   * @param {number} totalPlayers - Total players in series
+   * @returns {Object} Throw stats
+   */
+  detectThrows(progression, totalPlayers) {
+    if (progression.length === 0) return { hadThrow: false, throwSeverity: 0 };
+
+    const midPoint = Math.floor(progression.length / 2);
+    const earlyPosition = progression[midPoint]?.position || 0;
+    const finalPosition = progression[progression.length - 1]?.position || 0;
+
+    // Throw = started in top half, finished in bottom half
+    const topHalfThreshold = Math.ceil(totalPlayers / 2);
+    const bottomHalfThreshold = Math.ceil(totalPlayers / 2);
+
+    const startedAhead = earlyPosition <= topHalfThreshold;
+    const finishedBehind = finalPosition > bottomHalfThreshold;
+
+    if (startedAhead && finishedBehind) {
+      const throwSeverity = finalPosition - earlyPosition; // Bigger = worse throw
+      return { hadThrow: true, throwSeverity };
+    }
+
+    return { hadThrow: false, throwSeverity: 0 };
+  }
+
+  // ===== PLAYER COMEBACK ANALYSIS =====
+
+  /**
+   * Get comprehensive comeback analysis for a player
+   */
+  async getPlayerComebackAnalysis(playerId) {
+    const mongoose = require("mongoose");
+    const Series = require("../models/Series");
+
+    // Get all series
+    const allSeries = await Series.find().sort({ createdAt: 1 }).lean();
+    
+    if (allSeries.length === 0) {
+      return {
+        totalSeries: 0,
+        comebacks: 0,
+        throws: 0,
+        comebackRate: 0,
+        throwRate: 0,
+        avgComebackStrength: 0,
+        avgThrowSeverity: 0,
+        mentalToughness: 'N/A',
+        momentumShifts: 0,
+        seriesBreakdown: [],
+      };
+    }
+
+    const seriesIds = allSeries.map(s => s._id);
+    const playerObjectId = new mongoose.Types.ObjectId(playerId);
+
+    // Fetch all games where player participated
+    const games = await Game.find({
+      seriesId: { $in: seriesIds },
+      $or: [
+        { teamBlue: playerObjectId },
+        { teamRed: playerObjectId }
+      ]
+    })
+      .populate("teamBlue", "name")
+      .populate("teamRed", "name")
+      .populate("seriesId", "name createdAt")
+      .lean();
+
+    if (games.length === 0) {
+      return {
+        totalSeries: 0,
+        comebacks: 0,
+        throws: 0,
+        comebackRate: 0,
+        throwRate: 0,
+        avgComebackStrength: 0,
+        avgThrowSeverity: 0,
+        mentalToughness: 'N/A',
+        momentumShifts: 0,
+        seriesBreakdown: [],
+      };
+    }
+
+    // Group by series
+    const gamesBySeries = new Map();
+    games.forEach(game => {
+      const seriesId = game.seriesId._id.toString();
+      if (!gamesBySeries.has(seriesId)) {
+        gamesBySeries.set(seriesId, {
+          games: [],
+          seriesName: game.seriesId.name,
+        });
+      }
+      gamesBySeries.get(seriesId).games.push(game);
+    });
+
+    let totalComebacks = 0;
+    let totalThrows = 0;
+    let comebackStrengths = [];
+    let throwSeverities = [];
+    let totalMomentumShifts = 0;
+    const seriesBreakdown = [];
+
+    // Analyze each series
+    for (const [seriesId, seriesData] of gamesBySeries) {
+      const seriesGames = seriesData.games.sort((a, b) => a.gameNumber - b.gameNumber);
+
+      // Get total players in series
+      const allPlayerIds = new Set();
+      seriesGames.forEach(game => {
+        game.teamBlue.forEach(p => allPlayerIds.add(p._id.toString()));
+        game.teamRed.forEach(p => allPlayerIds.add(p._id.toString()));
+      });
+      const totalPlayers = allPlayerIds.size;
+
+      // Get position progression
+      const progression = this.getPositionProgression(playerId, seriesGames);
+
+      // Detect comebacks
+      const comeback = this.detectComebacks(progression, totalPlayers);
+      if (comeback.hadComeback) {
+        totalComebacks++;
+        comebackStrengths.push(comeback.comebackStrength);
+      }
+
+      // Detect throws
+      const throwData = this.detectThrows(progression, totalPlayers);
+      if (throwData.hadThrow) {
+        totalThrows++;
+        throwSeverities.push(throwData.throwSeverity);
+      }
+
+      // Count momentum shifts (position changes)
+      const shifts = progression.filter(p => p.change !== 0).length;
+      totalMomentumShifts += shifts;
+
+      // Store breakdown
+      seriesBreakdown.push({
+        seriesId,
+        seriesName: seriesData.seriesName,
+        hadComeback: comeback.hadComeback,
+        comebackStrength: comeback.comebackStrength,
+        hadThrow: throwData.hadThrow,
+        throwSeverity: throwData.throwSeverity,
+        momentumShifts: shifts,
+        progression,
+      });
+    }
+
+    const totalSeries = gamesBySeries.size;
+    const comebackRate = totalSeries > 0 ? (totalComebacks / totalSeries) * 100 : 0;
+    const throwRate = totalSeries > 0 ? (totalThrows / totalSeries) * 100 : 0;
+    const avgComebackStrength = comebackStrengths.length > 0 
+      ? comebackStrengths.reduce((a, b) => a + b, 0) / comebackStrengths.length 
+      : 0;
+    const avgThrowSeverity = throwSeverities.length > 0
+      ? throwSeverities.reduce((a, b) => a + b, 0) / throwSeverities.length
+      : 0;
+
+    // Mental toughness rating
+    let mentalToughness = 'N/A';
+    if (totalSeries >= 3) {
+      const toughnessScore = comebackRate - throwRate;
+      if (toughnessScore >= 30) mentalToughness = 'Elite';
+      else if (toughnessScore >= 15) mentalToughness = 'Strong';
+      else if (toughnessScore >= 0) mentalToughness = 'Solid';
+      else if (toughnessScore >= -15) mentalToughness = 'Shaky';
+      else mentalToughness = 'Fragile';
+    }
+
+    return {
+      totalSeries,
+      comebacks: totalComebacks,
+      throws: totalThrows,
+      comebackRate: Math.round(comebackRate * 10) / 10,
+      throwRate: Math.round(throwRate * 10) / 10,
+      avgComebackStrength: Math.round(avgComebackStrength * 10) / 10,
+      avgThrowSeverity: Math.round(avgThrowSeverity * 10) / 10,
+      mentalToughness,
+      momentumShifts: totalMomentumShifts,
+      seriesBreakdown,
+    };
   }
 }
 

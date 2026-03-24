@@ -176,4 +176,82 @@ router.get("/:playerId/game-progression", async (req, res) => {
   }
 });
 
+// GET /api/players/:playerId/performance-trends
+router.get("/:playerId/performance-trends", async (req, res) => {
+  try {
+    const { playerId } = req.params;
+
+    // Cache key
+    const cacheKey = cacheManager.generateKey("player-performance-trends", playerId);
+
+    // Check cache first
+    const cached = cacheManager.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    // Calculate performance trends
+    const trends = await statsService.getPlayerPerformanceTrends(playerId);
+
+    // Cache the result
+    cacheManager.set(cacheKey, trends);
+
+    res.status(200).json(trends);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// GET /api/players/:playerId/clutch-stats
+router.get("/:playerId/clutch-stats", async (req, res) => {
+  try {
+    const { playerId } = req.params;
+
+    // Cache key
+    const cacheKey = cacheManager.generateKey("player-clutch-stats", playerId);
+
+    // Check cache first
+    const cached = cacheManager.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    // Calculate clutch stats
+    const clutchStats = await statsService.getPlayerClutchStats(playerId);
+
+    // Cache the result
+    cacheManager.set(cacheKey, clutchStats);
+
+    res.status(200).json(clutchStats);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// GET /api/players/:playerId/comeback-analysis
+router.get("/:playerId/comeback-analysis", async (req, res) => {
+  try {
+    const { playerId } = req.params;
+
+    // Cache key
+    const cacheKey = cacheManager.generateKey("player-comeback-analysis", playerId);
+
+    // Check cache first
+    const cached = cacheManager.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    // Calculate comeback analysis
+    const comebackAnalysis = await statsService.getPlayerComebackAnalysis(playerId);
+
+    // Cache the result
+    cacheManager.set(cacheKey, comebackAnalysis);
+
+    res.status(200).json(comebackAnalysis);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 module.exports = router;

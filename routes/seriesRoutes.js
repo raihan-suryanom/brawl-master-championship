@@ -37,9 +37,11 @@ router.post("/", validateAdminPassword, async (req, res) => {
     // AGGRESSIVE CACHE INVALIDATION
     console.log('[Cache] Invalidating after series POST...');
     
-    // New series affects position history
+    // New series affects position history and performance trends
     cacheManager.deletePattern('^player-position-history:');
     cacheManager.deletePattern('^player-full-profile:');
+    cacheManager.deletePattern('^player-performance-trends:');
+    cacheManager.deletePattern('^player-clutch-stats:');
     
     console.log('[Cache] Invalidation complete');
     

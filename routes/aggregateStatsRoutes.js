@@ -47,4 +47,28 @@ router.get("/best-combinations", async (req, res) => {
   }
 });
 
+// GET /api/aggregate-stats/series-difficulty
+router.get("/series-difficulty", async (req, res) => {
+  try {
+    // Cache key
+    const cacheKey = cacheManager.generateKey("aggregate-series-difficulty", "all");
+
+    // Check cache first
+    const cached = cacheManager.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    // Get all series difficulty ratings
+    const difficulties = await statsService.getAllSeriesDifficulty();
+
+    // Cache the result
+    cacheManager.set(cacheKey, difficulties);
+
+    res.status(200).json(difficulties);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 module.exports = router;
