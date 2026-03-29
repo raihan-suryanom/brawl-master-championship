@@ -175,22 +175,46 @@ class StatsService {
 
     // Calculate max and min possible pts for each player
     stats.forEach((stat) => {
-      // MAX POSSIBLE PTS (Best Case Scenario)
-      // - Win all remaining games
-      // - Win streak could reach gamesRemaining (if better than current)
-      // - Lose streak stays same (no more losses)
+      // Get player's games for active streak calculation
+      const playerGames = games.filter(game => {
+        return game.teamBlue.some(p => p._id.toString() === stat.playerId) ||
+               game.teamRed.some(p => p._id.toString() === stat.playerId);
+      });
+      
+      const activeStreak = this.calculateActiveStreak(stat.playerId, playerGames);
+      
+      // MAX POSSIBLE PTS (Best Case Scenario - Win All Remaining)
       const maxTotalWin = stat.totalWin + gamesRemaining;
-      const maxWinStreak = Math.max(stat.highestWinStreak, gamesRemaining);
-      const minLoseStreak = stat.highestLoseStreak;
+      
+      let maxWinStreak;
+      if (activeStreak > 0) {
+        // Currently on win streak - extend it
+        const projectedWinStreak = activeStreak + gamesRemaining;
+        maxWinStreak = Math.max(stat.highestWinStreak, projectedWinStreak);
+      } else {
+        // Not on win streak - start fresh streak
+        const newStreak = gamesRemaining;
+        maxWinStreak = Math.max(stat.highestWinStreak, newStreak);
+      }
+      
+      const minLoseStreak = stat.highestLoseStreak; // No more losses in best case
       stat.maxPossiblePts = maxTotalWin + maxWinStreak - minLoseStreak;
       
-      // MIN POSSIBLE PTS (Worst Case Scenario)
-      // - Lose all remaining games
-      // - Win streak stays same (no improvement)
-      // - Lose streak could extend by gamesRemaining
-      const minTotalWin = stat.totalWin;
-      const minWinStreak = stat.highestWinStreak;
-      const maxLoseStreak = Math.max(stat.highestLoseStreak, gamesRemaining);
+      // MIN POSSIBLE PTS (Worst Case Scenario - Lose All Remaining)
+      const minTotalWin = stat.totalWin; // No new wins
+      const minWinStreak = stat.highestWinStreak; // No improvement
+      
+      let maxLoseStreak;
+      if (activeStreak < 0) {
+        // Currently on lose streak - extend it
+        const projectedLoseStreak = Math.abs(activeStreak) + gamesRemaining;
+        maxLoseStreak = Math.max(stat.highestLoseStreak, projectedLoseStreak);
+      } else {
+        // Not on lose streak - start fresh lose streak
+        const newStreak = gamesRemaining;
+        maxLoseStreak = Math.max(stat.highestLoseStreak, newStreak);
+      }
+      
       stat.minPossiblePts = minTotalWin + minWinStreak - maxLoseStreak;
     });
 
@@ -2071,6 +2095,40 @@ class StatsService {
 
   // ===== REUSABLE HELPER FUNCTIONS =====
   
+  /**
+   * Calculate current active win/lose streak from game history
+   * @param {string} playerId - Player ID
+   * @param {Array} games - Games sorted by gameNumber
+   * @returns {number} Active streak (positive = win streak, negative = lose streak, 0 = no games)
+   */
+  calculateActiveStreak(playerId, games) {
+    if (games.length === 0) return 0;
+    
+    // Start from most recent game and count backwards
+    let activeStreak = 0;
+    let lastResult = null;
+    
+    for (let i = games.length - 1; i >= 0; i--) {
+      const game = games[i];
+      const isBlue = game.teamBlue.some(p => (p._id?.toString() || p.toString()) === playerId.toString());
+      const isWin = (isBlue && game.winner === "teamBlue") || (!isBlue && game.winner === "teamRed");
+      
+      if (lastResult === null) {
+        // First game (most recent)
+        lastResult = isWin;
+        activeStreak = isWin ? 1 : -1;
+      } else if (lastResult === isWin) {
+        // Streak continues
+        activeStreak = isWin ? activeStreak + 1 : activeStreak - 1;
+      } else {
+        // Streak broken
+        break;
+      }
+    }
+    
+    return activeStreak;
+  }
+
   /**
    * Get position at specific game number for a player in a series
    * @param {string} playerId - Player ID

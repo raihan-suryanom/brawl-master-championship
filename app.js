@@ -18,6 +18,27 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Health check endpoint (for UptimeRobot / monitoring)
+app.get("/health", (req, res) => {
+  res.status(200).json({ 
+    status: "healthy", 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// Root endpoint
+app.get("/", (req, res) => {
+  res.status(200).json({ 
+    message: "MLBB Brawl Master Championship API", 
+    version: "1.0.0",
+    endpoints: {
+      health: "/health",
+      api: "/api/*"
+    }
+  });
+});
+
 // Routes
 app.use("/api/players", playerRoutes);
 app.use("/api/players", playerStatsRoutes);
